@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# BEX compiled files
+*.bexw64
+*.bexa64
+*.bexmaci64
+*.o
+*.obj
+*.dll
+
+# CMake
+bex/build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# Environment variables
+.env
+.env.local
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage
