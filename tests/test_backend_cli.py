@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,10 @@ def write_executable(path: Path, body: str) -> Path:
     path.write_text(body, encoding="utf-8")
     path.chmod(0o755)
     return path
+
+
+def write_python_executable(path: Path, body: str) -> Path:
+    return write_executable(path, f"#!{sys.executable}\n{body}")
 
 
 def run(coro):
@@ -32,10 +37,10 @@ def test_create_engine_keeps_bex_unimplemented() -> None:
 
 
 def test_execute_code_runs_baltamatica_cli(tmp_path: Path) -> None:
-    executable = write_executable(
+    executable = write_python_executable(
         tmp_path / "fake-baltamatica",
-        "#!/bin/sh\n"
-        "printf 'argv:%s\\n' \"$*\"\n",
+        "import sys\n"
+        "print('argv:' + ' '.join(sys.argv[1:]))\n",
     )
     state_file = tmp_path / "state.mat"
     engine = CliEngine(executable=str(executable), timeout=2, state_file=state_file)
@@ -66,10 +71,10 @@ def test_execute_code_returns_nonzero_exit_as_failed_result(tmp_path: Path) -> N
 
 
 def test_run_script_uses_run_command_with_escaped_path(tmp_path: Path) -> None:
-    executable = write_executable(
+    executable = write_python_executable(
         tmp_path / "fake-baltamatica",
-        "#!/bin/sh\n"
-        "printf '%s\\n' \"$3\"\n",
+        "import sys\n"
+        "print(sys.argv[3])\n",
     )
     script_path = tmp_path / "name'with quote.m"
     script_path.write_text("disp(1)", encoding="utf-8")
@@ -132,10 +137,10 @@ def test_path_lookup_uses_command_name(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 def test_clear_workspace_removes_state_file(tmp_path: Path) -> None:
-    executable = write_executable(
+    executable = write_python_executable(
         tmp_path / "fake-baltamatica",
-        "#!/bin/sh\n"
-        "printf '%s\\n' \"$3\"\n",
+        "import sys\n"
+        "print(sys.argv[3])\n",
     )
     state_file = tmp_path / "state.mat"
     state_file.write_text("state", encoding="utf-8")
@@ -172,10 +177,10 @@ def test_list_variables_parses_whos_output(tmp_path: Path) -> None:
 
 
 def test_get_variable_uses_readonly_disp_command(tmp_path: Path) -> None:
-    executable = write_executable(
+    executable = write_python_executable(
         tmp_path / "fake-baltamatica",
-        "#!/bin/sh\n"
-        "printf '%s\\n' \"$3\"\n",
+        "import sys\n"
+        "print(sys.argv[3])\n",
     )
     state_file = tmp_path / "state.mat"
     engine = CliEngine(executable=str(executable), timeout=2, state_file=state_file)
