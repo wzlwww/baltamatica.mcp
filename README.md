@@ -142,7 +142,54 @@ claude mcp add baltamatica -- /path/to/baltamatica.mcp/.venv/bin/python -m balta
 如果暂时没有 C 编译环境，可以使用 CLI 后端启动：
 
 ```bash
-python -m baltamatica_mcp --backend cli
+BALTAMATICA_CLI=/path/to/baltamatica python -m baltamatica_mcp --backend cli
+```
+
+macOS 社区版通常使用真实可执行文件，而不是 `baltamaticaC.sh` 包装脚本：
+
+```bash
+/Applications/Baltamatica.app/Contents/MacOS/baltamatica
+```
+
+也可以直接通过参数指定北太天元命令行入口和单次执行超时：
+
+```bash
+python -m baltamatica_mcp --backend cli --cli-executable /path/to/baltamatica --timeout 30
+```
+
+CLI 后端会用 `.mat` 状态文件在多次 MCP 调用之间保存工作区变量。默认使用临时状态文件，
+也可以显式指定：
+
+```bash
+python -m baltamatica_mcp --backend cli --state-file /tmp/baltamatica-mcp-state.mat
+```
+
+### 在 Codex 中配置
+
+```bash
+codex mcp add baltamatica \
+  --env PYTHONPATH=/path/to/baltamatica.mcp/src \
+  --env BALTAMATICA_CLI=/Applications/Baltamatica.app/Contents/MacOS/baltamatica \
+  -- python3 -m baltamatica_mcp --backend cli --timeout 30
+```
+
+配置后可通过 MCP 工具调用 `execute_code`、`run_script`、`list_variables`、
+`get_variable` 和 `clear_workspace`。
+
+### 开发测试
+
+运行不依赖北太天元安装的单元测试：
+
+```bash
+PYTHONPATH=src pytest -q -m "not integration"
+PYTHONPATH=src python3 -m compileall -q src tests
+```
+
+如果本机已安装北太天元 CLI，可以启用真实集成测试：
+
+```bash
+BALTAMATICA_CLI=/Applications/Baltamatica.app/Contents/MacOS/baltamatica \
+  PYTHONPATH=src pytest -q -m integration
 ```
 
 ---
@@ -208,10 +255,11 @@ baltamatica.mcp/
 
 ### Phase 1：项目骨架 & CLI Fallback 后端
 - [x] 项目结构初始化
-- [ ] Python MCP Server 骨架（`FastMCP`）
-- [ ] CLI 后端实现（`subprocess` + `baltamaticaC.sh -nodesktop -s`）
-- [ ] `execute_code` / `run_script` 工具
-- [ ] 基本单元测试
+- [x] Python MCP Server 骨架（`FastMCP`）
+- [x] CLI 后端实现（`subprocess` + `baltamaticaC.sh -nodesktop -s`）
+- [x] `execute_code` / `run_script` 工具
+- [x] `list_variables` / `get_variable` / `clear_workspace` 工具（CLI 基础版）
+- [x] 基本单元测试
 
 ### Phase 2：BEX 桥接插件（核心）
 - [ ] C 语言 BEX 插件：TCP Socket 监听线程
