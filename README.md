@@ -20,69 +20,47 @@
 - 📂 **管理脚本**：运行本地 `.m` 脚本文件
 - 🧹 **清空工作区**：重置计算环境
 
-**核心特性**：所有计算在同一个北太天元进程中执行，**变量和工作区状态在多次调用之间保持**，实现真正的交互式科学计算体验。
+**当前状态**：CLI 后端已经可用，支持执行代码、运行脚本、查询变量、读取变量和清空工作区。CLI 模式通过 `.mat` 状态文件在多次 MCP 调用之间保持工作区变量；BEX 长连接后端仍在规划中。
 
 ---
 
 ## 🏗️ 系统架构
 
-本项目默认采用 **BEX 插件 + TCP Socket** 架构，实现 AI 代理与北太天元内核之间的高性能双向通信。
+当前实现优先提供 **CLI fallback 后端**，通过北太天元命令行入口执行代码，并用 `.mat` 状态文件保持工作区变量。后续将扩展 **BEX 插件 + TCP Socket** 后端，用于更低延迟和更高性能的数据访问。
 
 ```
 ┌──────────────────────────────────────────────────────────┐
 │                AI Agent (Claude Code / Cursor / Codex)   │
-│                                                          │
-│    "帮我生成一个 5x5 随机矩阵，求其特征值"                  │
 └─────────────────────────┬────────────────────────────────┘
                           │ MCP Protocol (stdio)
                           ▼
 ┌──────────────────────────────────────────────────────────┐
 │               Python MCP Server (baltamatica-mcp)        │
 │                                                          │
-│  ┌────────────┐ ┌──────────────┐ ┌────────────────────┐  │
-│  │ exec_code  │ │ list_variables│ │ get_variable_value │  │
-│  └─────┬──────┘ └──────┬───────┘ └─────────┬──────────┘  │
-│        └───────────────┼───────────────────┘             │
-│                        │                                 │
-│           ┌────────────┴────────────┐                    │
-│           │    Engine Dispatcher    │                    │
-│           │  (自动选择通信后端)       │                    │
-│           └─────┬──────────┬────────┘                    │
-│                 │          │                             │
-│      ┌──────────▼──┐  ┌───▼──────────┐                  │
-│      │ BEX 后端    │  │ CLI 后端     │                  │
-│      │ (默认,高性能)│  │ (fallback)   │                  │
-│      │ TCP Socket  │  │ subprocess   │                  │
-│      └──────┬──────┘  └───┬──────────┘                  │
-└─────────────┼─────────────┼──────────────────────────────┘
-              │             │
-              ▼             ▼
-┌─────────────────────┐  ┌──────────────────────────────┐
-│  BEX Plugin         │  │  baltamaticaC.sh -nodesktop  │
-│  (mcp_bridge.so)    │  │  -s "command"                │
-│                     │  └──────────────────────────────┘
-│  bxEvalIn()         │
-│  bxGetVariableNames()│
-│  bxGetDoublesRO()   │
-│  bxAddVariable()    │
-│                     │
-│  ┌───────────────┐  │
-│  │ Baltamatica   │  │
-│  │ Engine Core   │  │
-│  └───────────────┘  │
-└─────────────────────┘
+│  execute_code / run_script / list_variables              │
+│  get_variable / clear_workspace                          │
+│                                                          │
+│             Engine Dispatcher                            │
+│                    │                                     │
+│                    ▼                                     │
+│             CLI Backend                                  │
+│      subprocess + .mat state file                        │
+└────────────────────┬─────────────────────────────────────┘
+                     ▼
+        Baltamatica CLI: baltamatica -nodesktop -s "..."
 ```
 
-### 两种后端对比
+### 后端状态
 
-| 特性 | 🚀 BEX 后端（默认） | 🐢 CLI 后端（fallback） |
-|:---|:---|:---|
-| **通信方式** | TCP Socket 长连接 | 每次启动新进程 |
-| **响应延迟** | < 1 ms | ~700 ms |
-| **变量状态保持** | ✅ 天然保持 | ❌ 需 save/load |
-| **大矩阵传输** | 二进制直传，极快 | 文本序列化，慢 |
-| **安装门槛** | 需编译 BEX 插件 | 零编译，开箱即用 |
-| **适用场景** | 日常开发、大规模计算、实时仿真 | 快速体验、无编译环境 |
+| 特性 | CLI 后端（已实现） | BEX 后端（规划中） |
+|:---|:---:|:---:|
+| `execute_code` | ✅ | 规划中 |
+| `run_script` | ✅ | 规划中 |
+| `list_variables` | ✅ `whos` 解析 | 规划中 |
+| `get_variable` | ✅ `disp()` 文本 | 规划中 |
+| `clear_workspace` | ✅ | 规划中 |
+| 工作区状态保持 | ✅ `.mat` 状态文件 | 规划中，长连接天然保持 |
+| 图像/文件产物反馈 | 规划中 | 规划中 |
 
 ---
 
@@ -92,7 +70,8 @@
 
 - Python 3.10+
 - [北太天元 2025](https://www.baltamatica.com/download.html)（社区版即可）
-- C 编译器（gcc / clang / MSVC，用于编译 BEX 插件）
+- 北太天元命令行入口（macOS 通常是 `/Applications/Baltamatica.app/Contents/MacOS/baltamatica`）
+- C 编译器（可选，后续 BEX 插件开发需要）
 
 ### 安装
 
@@ -104,17 +83,9 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-### 编译 BEX 插件
+### BEX 插件状态
 
-```bash
-cd bex
-mkdir build && cd build
-cmake .. -DBALTAM_ROOT=/opt/Baltamatica   # Linux
-# cmake .. -DBALTAM_ROOT=/Applications/Baltamatica.app/Contents  # macOS
-make
-# 编译产物 mcp_bridge.bexa64 (Linux) / mcp_bridge.bexmaci64 (macOS)
-# 将其复制到北太天元的 plugins 目录或工作目录
-```
+BEX 后端仍在规划中，当前仓库只包含占位源码。日常试用请先使用 CLI 后端。
 
 ### 在 Claude Desktop 中配置
 
@@ -198,89 +169,67 @@ BALTAMATICA_CLI=/Applications/Baltamatica.app/Contents/MacOS/baltamatica \
 
 ```
 baltamatica.mcp/
-├── README.md                   # 项目说明文档
-├── LICENSE                     # MIT 开源许可证
-├── pyproject.toml              # Python 项目配置 & 依赖管理
-├── .gitignore                  # Git 忽略规则
-│
-├── src/
-│   └── baltamatica_mcp/
-│       ├── __init__.py         # 包初始化
-│       ├── __main__.py         # 入口：python -m baltamatica_mcp
-│       ├── server.py           # MCP Server 主逻辑 & Tool 注册
-│       ├── engine.py           # 引擎调度器（自动选择 BEX / CLI 后端）
-│       ├── backend_bex.py      # BEX 后端：TCP Socket 客户端
-│       ├── backend_cli.py      # CLI 后端：subprocess 调用（fallback）
-│       └── serializer.py       # 变量序列化（矩阵→JSON）
-│
-├── bex/                        # BEX 插件源码（C 语言）
-│   ├── CMakeLists.txt          # 跨平台编译配置
-│   ├── mcp_bridge.c            # 插件核心：TCP 监听 + bxEvalIn 调用
-│   ├── mcp_bridge.h            # 头文件
-│   └── protocol.h              # MCP ↔ BEX 通信协议定义（JSON 消息格式）
-│
+├── README.md
+├── LICENSE
+├── pyproject.toml
+├── .github/workflows/ci.yml
+├── src/baltamatica_mcp/
+│   ├── __init__.py
+│   ├── __main__.py
+│   ├── server.py           # MCP Server & Tool 注册
+│   ├── engine.py           # 后端协议与结果类型
+│   ├── backend_cli.py      # CLI 后端：subprocess + .mat 状态文件
+│   └── serializer.py       # 后续变量序列化占位
+├── bex/
+│   └── mcp_bridge.c        # 后续 BEX 插件占位
 ├── tests/
-│   ├── test_backend_bex.py     # BEX 后端集成测试
-│   ├── test_backend_cli.py     # CLI 后端单元测试
-│   ├── test_server.py          # MCP Tool 端到端测试
-│   └── fixtures/
-│       └── sample_script.m     # 测试用 .m 脚本
-│
+│   ├── test_backend_cli.py
+│   ├── test_integration_cli.py
+│   ├── test_server.py
+│   └── fixtures/sample_script.m
 ├── docs/
-│   ├── architecture.md         # 架构设计详细说明
-│   ├── bex-build-guide.md      # BEX 插件编译指南（各平台）
-│   ├── sdk-api-reference.md    # 北太天元 BEX SDK API 速查
-│   └── contributing.md         # 贡献指南
-│
+│   ├── contributing.md
+│   └── pr-plan.md
 └── examples/
-    ├── monte_carlo_pi.m        # 蒙特卡洛估算 Pi
-    └── matrix_demo.m           # 矩阵运算示例
+    ├── monte_carlo_pi.m
+    └── numerical_pipeline_demo.m
 ```
 
 ---
 
 ## 🛠️ MCP Tools（暴露给 AI 的工具接口）
 
-| Tool 名称 | 参数 | 描述 | BEX 后端 | CLI 后端 |
+| Tool 名称 | 参数 | 描述 | CLI 后端 | BEX 后端 |
 |:---|:---|:---|:---:|:---:|
-| `execute_code` | `code: string` | 执行代码并返回控制台输出 | ✅ | ✅ |
-| `run_script` | `file_path: string` | 运行 `.m` 脚本文件 | ✅ | ✅ |
-| `list_variables` | — | 列出工作区所有变量（名称、类型、维度） | ✅ 结构化 | ✅ 解析 whos |
-| `get_variable` | `name: string` | 获取变量值（JSON 格式） | ✅ 二进制直读 | ✅ 文本解析 |
-| `clear_workspace` | — | 清空工作区 | ✅ | ✅ |
+| `execute_code` | `code: string` | 执行代码并返回控制台输出 | ✅ | 规划中 |
+| `run_script` | `file_path: string` | 运行 `.m` 脚本文件 | ✅ | 规划中 |
+| `list_variables` | — | 列出工作区所有变量（名称、类型、维度） | ✅ `whos` 解析 | 规划中 |
+| `get_variable` | `name: string` | 获取变量显示值 | ✅ `disp()` 文本 | 规划中 |
+| `clear_workspace` | — | 清空工作区状态 | ✅ | 规划中 |
 
 ---
 
 ## 🗺️ 开发路线图 (Roadmap)
 
-### Phase 1：项目骨架 & CLI Fallback 后端
-- [x] 项目结构初始化
-- [x] Python MCP Server 骨架（`FastMCP`）
-- [x] CLI 后端实现（`subprocess` + `baltamaticaC.sh -nodesktop -s`）
-- [x] `execute_code` / `run_script` 工具
-- [x] `list_variables` / `get_variable` / `clear_workspace` 工具（CLI 基础版）
-- [x] 基本单元测试
+详细 PR 拆分和实现方案见 [docs/pr-plan.md](docs/pr-plan.md)。
 
-### Phase 2：BEX 桥接插件（核心）
-- [ ] C 语言 BEX 插件：TCP Socket 监听线程
-- [ ] JSON 消息协议定义（`protocol.h`）
-- [ ] `bxEvalIn` 执行 / `bxGetVariableNames` 变量查询
-- [ ] `bxGetDoublesRO` 大矩阵二进制序列化
-- [ ] CMake 跨平台编译（Linux / macOS / Windows）
-- [ ] 插件自动发现与加载
+### 已完成
 
-### Phase 3：BEX 后端集成 & 变量序列化
-- [ ] Python 端 TCP 长连接客户端（`backend_bex.py`）
-- [ ] 引擎调度器：自动检测 BEX 插件是否可用，否则降级 CLI
-- [ ] 变量 JSON 序列化（矩阵、结构体、元胞数组、稀疏矩阵）
-- [ ] `list_variables` / `get_variable` 工具（BEX 高性能版）
-- [ ] 错误处理、超时、断线重连
+- [x] MCP Server 骨架（`FastMCP`）
+- [x] CLI 后端（`subprocess` + `baltamatica -nodesktop -s`）
+- [x] `execute_code` / `run_script`
+- [x] `.mat` 状态文件保持 CLI 工作区
+- [x] `list_variables` / `get_variable` / `clear_workspace`
+- [x] 可选真实集成测试与 GitHub Actions CI
+- [x] 数值计算示例：`examples/numerical_pipeline_demo.m`
 
-### Phase 4：打磨与发布
-- [ ] 远程 SSH 模式支持
-- [ ] 预编译 BEX 二进制分发（GitHub Releases）
-- [ ] PyPI 发布 & MCP 官方服务列表注册
-- [ ] 完善文档与示例
+### 下一步
+
+- [ ] 图像/文件产物反馈（Artifact/Image Feedback）
+- [ ] BEX JSON 协议设计
+- [ ] BEX 插件最小可用版
+- [ ] BEX 变量读取与序列化
+- [ ] 发布与安装体验完善
 
 ---
 
