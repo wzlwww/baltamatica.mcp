@@ -109,35 +109,39 @@ Verification:
 - `BALTAMATICA_CLI=/Applications/Baltamatica.app/Contents/MacOS/baltamatica PYTHONPATH=src pytest -q`
 - `PYTHONPATH=src python3 -m compileall -q src tests`
 
-## Planned PRs
-
 ### PR5: Artifact and Image Feedback
+
+Branch: `codex/artifact-feedback`
 
 Goal: allow scripts that generate plots or files to report artifacts back to the MCP client.
 
-Proposed implementation:
+Implemented:
 
-- Add an `Artifact` dataclass:
+- Added an `Artifact` dataclass:
   - `path`
   - `type`
   - `exists`
   - `size`
-- Extend `ExecutionResult` with `artifacts: list[Artifact]`.
-- Parse stdout lines such as:
+- Extended `ExecutionResult` with `artifacts`.
+- Parsed stdout lines such as:
   - `BALTAMATICA_ARTIFACT=/tmp/plot.png`
-  - optionally `BALTAMATICA_ARTIFACT=image/png:/tmp/plot.png`
-- Resolve and validate artifact paths.
-- Add an example plotting script that saves PNG output.
-- Add integration tests:
-  - run plotting script
-  - parse artifact metadata
-  - assert file exists and is non-empty
-- Document how Codex can display local image artifacts with Markdown image syntax.
+  - `BALTAMATICA_ARTIFACT=image/png:/tmp/plot.png`
+- Added MIME type inference from common file extensions.
+- Added `examples/artifact_export_demo.m`.
+- Added unit and real integration tests for artifact parsing and reporting.
+
+Verification:
+
+- `python3 -m ruff check src tests`
+- `BALTAMATICA_CLI=/Applications/Baltamatica.app/Contents/MacOS/baltamatica PYTHONPATH=src pytest -q`
+- `PYTHONPATH=src python3 -m compileall -q src tests`
 
 Out of scope:
 
 - Binary payload transfer through MCP.
 - Automatic figure capture without an explicit saved file.
+
+## Planned PRs
 
 ### PR6: BEX Protocol Design
 

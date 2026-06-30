@@ -11,15 +11,34 @@ BackendName = Literal["auto", "cli", "bex"]
 
 
 @dataclass(frozen=True)
+class Artifact:
+    """File artifact produced by a Baltamatica command."""
+
+    path: str
+    type: str
+    exists: bool
+    size: int
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class ExecutionResult:
     """Normalized result returned by all engine backends."""
 
     success: bool
     output: str = ""
     error: str | None = None
+    artifacts: list[Artifact] | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        return {
+            "success": self.success,
+            "output": self.output,
+            "error": self.error,
+            "artifacts": [artifact.to_dict() for artifact in self.artifacts or []],
+        }
 
 
 @dataclass(frozen=True)

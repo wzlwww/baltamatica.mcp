@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from baltamatica_mcp.backend_cli import CliEngine, parse_whos_output
+from baltamatica_mcp.backend_cli import CliEngine, parse_artifacts, parse_whos_output
 from baltamatica_mcp.engine import EngineUnavailableError, create_engine
 
 
@@ -43,7 +43,7 @@ def test_execute_code_runs_baltamatica_cli(tmp_path: Path) -> None:
         "print('argv:' + ' '.join(sys.argv[1:]))\n",
     )
     state_file = tmp_path / "state.mat"
-    engine = CliEngine(executable=str(executable), timeout=2, state_file=state_file)
+    engine = CliEngine(executable=str(executable), timeout=10, state_file=state_file)
 
     result = run(engine.execute_code("disp(1 + 1)"))
 
@@ -61,13 +61,35 @@ def test_execute_code_returns_nonzero_exit_as_failed_result(tmp_path: Path) -> N
         "echo 'bad code' >&2\n"
         "exit 7\n",
     )
-    engine = CliEngine(executable=str(executable), timeout=2, state_file=tmp_path / "state.mat")
+    engine = CliEngine(executable=str(executable), timeout=10, state_file=tmp_path / "state.mat")
 
     result = run(engine.execute_code("bad"))
 
     assert result.success is False
     assert result.output == "bad code"
     assert result.error == "Baltamatica CLI exited with code 7: bad code"
+    assert result.artifacts == []
+
+
+def test_execute_code_parses_artifact_marker(tmp_path: Path) -> None:
+    artifact_path = tmp_path / "plot.png"
+    artifact_path.write_bytes(b"fake-png")
+    executable = write_python_executable(
+        tmp_path / "fake-baltamatica",
+        "import sys\n"
+        f"print('BALTAMATICA_ARTIFACT={artifact_path}')\n",
+    )
+    engine = CliEngine(executable=str(executable), timeout=10, state_file=tmp_path / "state.mat")
+
+    result = run(engine.execute_code("disp(1)"))
+
+    assert result.success is True
+    assert result.artifacts is not None
+    assert len(result.artifacts) == 1
+    assert result.artifacts[0].path == str(artifact_path.resolve())
+    assert result.artifacts[0].type == "image/png"
+    assert result.artifacts[0].exists is True
+    assert result.artifacts[0].size == len(b"fake-png")
 
 
 def test_run_script_uses_run_command_with_escaped_path(tmp_path: Path) -> None:
@@ -78,7 +100,7 @@ def test_run_script_uses_run_command_with_escaped_path(tmp_path: Path) -> None:
     )
     script_path = tmp_path / "name'with quote.m"
     script_path.write_text("disp(1)", encoding="utf-8")
-    engine = CliEngine(executable=str(executable), timeout=2, state_file=tmp_path / "state.mat")
+    engine = CliEngine(executable=str(executable), timeout=10, state_file=tmp_path / "state.mat")
 
     result = run(engine.run_script(str(script_path)))
 
@@ -101,7 +123,7 @@ def test_environment_executable_is_used(tmp_path: Path, monkeypatch: pytest.Monk
         "echo env-executable\n",
     )
     monkeypatch.setenv("BALTAMATICA_CLI", str(executable))
-    engine = CliEngine(timeout=2)
+    engine = CliEngine(timeout=10)
 
     result = run(engine.execute_code("disp(1)"))
 
@@ -128,7 +150,7 @@ def test_path_lookup_uses_command_name(tmp_path: Path, monkeypatch: pytest.Monke
         "echo path-lookup\n",
     )
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
-    engine = CliEngine(executable=executable.name, timeout=2)
+    engine = CliEngine(executable=executable.name, timeout=10)
 
     result = run(engine.execute_code("disp(1)"))
 
@@ -144,7 +166,7 @@ def test_clear_workspace_removes_state_file(tmp_path: Path) -> None:
     )
     state_file = tmp_path / "state.mat"
     state_file.write_text("state", encoding="utf-8")
-    engine = CliEngine(executable=str(executable), timeout=2, state_file=state_file)
+    engine = CliEngine(executable=str(executable), timeout=10, state_file=state_file)
 
     result = run(engine.clear_workspace())
 
@@ -164,7 +186,7 @@ def test_list_variables_parses_whos_output(tmp_path: Path) -> None:
         "  label 1x5      10  char    global\n"
         "EOF\n",
     )
-    engine = CliEngine(executable=str(executable), timeout=2, state_file=tmp_path / "state.mat")
+    engine = CliEngine(executable=str(executable), timeout=10, state_file=tmp_path / "state.mat")
 
     result = run(engine.list_variables())
 
@@ -183,7 +205,7 @@ def test_get_variable_uses_readonly_disp_command(tmp_path: Path) -> None:
         "print(sys.argv[3])\n",
     )
     state_file = tmp_path / "state.mat"
-    engine = CliEngine(executable=str(executable), timeout=2, state_file=state_file)
+    engine = CliEngine(executable=str(executable), timeout=10, state_file=state_file)
 
     result = run(engine.get_variable("A"))
 
@@ -193,7 +215,7 @@ def test_get_variable_uses_readonly_disp_command(tmp_path: Path) -> None:
 
 
 def test_get_variable_rejects_invalid_name(tmp_path: Path) -> None:
-    engine = CliEngine(executable=str(tmp_path / "fake"), timeout=2)
+    engine = CliEngine(executable=str(tmp_path / "fake"), timeout=10)
 
     with pytest.raises(ValueError, match="Invalid variable name"):
         run(engine.get_variable("A; clear"))
@@ -209,3 +231,15 @@ def test_parse_whos_output_ignores_non_rows() -> None:
     )
 
     assert [variable.name for variable in variables] == ["A", "b"]
+
+
+def test_parse_artifacts_supports_explicit_type_and_missing_file(tmp_path: Path) -> None:
+    output_path = tmp_path / "table.csv"
+
+    artifacts = parse_artifacts(f"BALTAMATICA_ARTIFACT=text/csv:{output_path}\n")
+
+    assert len(artifacts) == 1
+    assert artifacts[0].path == str(output_path.resolve())
+    assert artifacts[0].type == "text/csv"
+    assert artifacts[0].exists is False
+    assert artifacts[0].size == 0

@@ -62,3 +62,44 @@ def test_real_cli_preserves_workspace_state(cli_path: Path, tmp_path: Path) -> N
     assert clear_result.success is True
     assert cleared_list_result.success is True
     assert cleared_list_result.variables == []
+
+
+def test_real_cli_reports_file_artifact(cli_path: Path, tmp_path: Path) -> None:
+    output_path = tmp_path / "artifact.txt"
+    state_path = tmp_path / "state.mat"
+    code = (
+        f"fid=fopen('{output_path.as_posix()}','w'); "
+        "fprintf(fid,'artifact from baltamatica'); "
+        "fclose(fid); "
+        f"fprintf('BALTAMATICA_ARTIFACT=text/plain:{output_path.as_posix()}\\n')"
+    )
+    engine = CliEngine(executable=str(cli_path), timeout=30, state_file=state_path)
+
+    result = run(engine.execute_code(code))
+
+    assert result.success is True
+    assert output_path.read_text(encoding="utf-8") == "artifact from baltamatica"
+    assert result.artifacts is not None
+    assert len(result.artifacts) == 1
+    assert result.artifacts[0].path == str(output_path.resolve())
+    assert result.artifacts[0].type == "text/plain"
+    assert result.artifacts[0].exists is True
+    assert result.artifacts[0].size > 0
+
+
+def test_real_cli_runs_artifact_export_demo(cli_path: Path, tmp_path: Path) -> None:
+    artifact_path = Path("/tmp/baltamatica_mcp_wave.csv")
+    if artifact_path.exists():
+        artifact_path.unlink()
+    script_path = Path("examples/artifact_export_demo.m").resolve()
+    engine = CliEngine(executable=str(cli_path), timeout=30, state_file=tmp_path / "state.mat")
+
+    result = run(engine.run_script(str(script_path)))
+
+    assert result.success is True
+    assert result.artifacts is not None
+    assert len(result.artifacts) == 1
+    assert result.artifacts[0].type == "text/csv"
+    assert result.artifacts[0].exists is True
+    assert result.artifacts[0].size > 0
+    assert artifact_path.read_text(encoding="utf-8").startswith("t,sin_t,cos_t")
