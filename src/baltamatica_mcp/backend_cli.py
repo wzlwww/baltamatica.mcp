@@ -1,0 +1,110 @@
+"""CLI backend for running Baltamatica commands through baltamaticaC.sh."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import shutil
+import subprocess
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+
+from baltamatica_mcp.engine import ExecutionResult, EngineUnavailableError
+
+DEFAULT_EXECUTABLE = "baltamaticaC.sh"
+ENV_EXECUTABLE = "BALTAMATICA_CLI"
+
+
+@dataclass(frozen=True)
+class CliProcessResult:
+    """Raw process result from the Baltamatica CLI."""
+
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+class CliEngine:
+    """Execute Baltamatica code by spawning the command-line runtime."""
+
+    backend = "cli"
+
+    def __init__(self, executable: str | None = None, timeout: float = 30.0) -> None:
+        self._configured_executable = executable
+        self.timeout = timeout
+
+    async def execute_code(self, code: str) -> ExecutionResult:
+        process = await self._run_cli([self._resolve_executable(), "-nodesktop", "-s", code])
+        output = _combine_output(process.stdout, process.stderr)
+        if process.returncode != 0:
+            return ExecutionResult(success=False, output=output, error=_process_error(process))
+        return ExecutionResult(success=True, output=output)
+
+    async def run_script(self, file_path: str) -> ExecutionResult:
+        script_command = f"run('{_escape_baltamatica_string(Path(file_path).as_posix())}')"
+        return await self.execute_code(script_command)
+
+    def _resolve_executable(self) -> str:
+        configured = self._configured_executable or os.environ.get(ENV_EXECUTABLE)
+        if configured:
+            path = Path(configured).expanduser()
+            if path.is_absolute() or len(path.parts) > 1:
+                if not path.exists():
+                    raise EngineUnavailableError(f"Baltamatica CLI executable does not exist: {path}")
+                if not path.is_file():
+                    raise EngineUnavailableError(f"Baltamatica CLI path is not a file: {path}")
+                return str(path)
+            resolved = shutil.which(configured)
+            if resolved:
+                return resolved
+            raise EngineUnavailableError(f"Baltamatica CLI executable not found on PATH: {configured}")
+
+        resolved = shutil.which(DEFAULT_EXECUTABLE)
+        if resolved:
+            return resolved
+        raise EngineUnavailableError(
+            f"Baltamatica CLI executable not found. Set {ENV_EXECUTABLE} or pass --cli-executable."
+        )
+
+    async def _run_cli(self, argv: Sequence[str]) -> CliProcessResult:
+        return await asyncio.to_thread(self._run_cli_sync, argv)
+
+    def _run_cli_sync(self, argv: Sequence[str]) -> CliProcessResult:
+        try:
+            process = subprocess.run(
+                argv,
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=self.timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError(f"Baltamatica CLI timed out after {self.timeout:g} seconds.") from exc
+        except OSError as exc:
+            raise EngineUnavailableError(f"Failed to start Baltamatica CLI: {exc}") from exc
+
+        return CliProcessResult(
+            returncode=process.returncode,
+            stdout=process.stdout,
+            stderr=process.stderr,
+        )
+
+
+def _combine_output(stdout: str, stderr: str) -> str:
+    output = stdout.strip()
+    error_output = stderr.strip()
+    if output and error_output:
+        return f"{output}\n{error_output}"
+    return output or error_output
+
+
+def _process_error(process: CliProcessResult) -> str:
+    message = process.stderr.strip() or process.stdout.strip()
+    if message:
+        return f"Baltamatica CLI exited with code {process.returncode}: {message}"
+    return f"Baltamatica CLI exited with code {process.returncode}."
+
+
+def _escape_baltamatica_string(value: str) -> str:
+    return value.replace("'", "''")

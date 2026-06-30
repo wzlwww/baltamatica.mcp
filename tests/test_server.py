@@ -117,7 +117,20 @@ def test_arg_parser_defaults_to_auto_stdio() -> None:
 
 
 def test_arg_parser_accepts_backend_and_transport() -> None:
-    args = build_arg_parser().parse_args(["--backend", "cli", "--transport", "sse"])
+    args = build_arg_parser().parse_args(
+        [
+            "--backend",
+            "cli",
+            "--transport",
+            "sse",
+            "--cli-executable",
+            "/opt/baltamatica/bin/baltamaticaC.sh",
+            "--timeout",
+            "12.5",
+        ]
+    )
 
     assert args.backend == "cli"
     assert args.transport == "sse"
+    assert args.cli_executable == "/opt/baltamatica/bin/baltamaticaC.sh"
+    assert args.timeout == 12.5

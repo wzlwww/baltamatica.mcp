@@ -97,6 +97,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="stdio",
         help="MCP transport to serve.",
     )
+    parser.add_argument(
+        "--cli-executable",
+        default=None,
+        help="Path or command name for baltamaticaC.sh. Defaults to BALTAMATICA_CLI or PATH.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="Seconds to wait for each Baltamatica CLI command.",
+    )
     return parser
 
 
@@ -104,7 +115,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     """Start the MCP server."""
 
     args = build_arg_parser().parse_args(argv)
-    engine = create_engine(args.backend)
+    engine = create_engine(
+        args.backend,
+        cli_executable=args.cli_executable,
+        timeout=args.timeout,
+    )
     create_mcp_server(engine).run(transport=args.transport)
 
 

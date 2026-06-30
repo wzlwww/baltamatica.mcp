@@ -60,7 +60,12 @@ class UnimplementedEngine:
         )
 
 
-def create_engine(backend: BackendName = "auto") -> BaltamaticaEngine:
+def create_engine(
+    backend: BackendName = "auto",
+    *,
+    cli_executable: str | None = None,
+    timeout: float = 30.0,
+) -> BaltamaticaEngine:
     """Create the engine selected by CLI configuration.
 
     Phase 1 wires the MCP surface and keeps the backend boundary explicit.
@@ -70,4 +75,8 @@ def create_engine(backend: BackendName = "auto") -> BaltamaticaEngine:
 
     if backend not in {"auto", "cli", "bex"}:
         raise ValueError(f"Unsupported backend: {backend}")
+    if backend in {"auto", "cli"}:
+        from baltamatica_mcp.backend_cli import CliEngine
+
+        return CliEngine(executable=cli_executable, timeout=timeout)
     return UnimplementedEngine(backend=backend)

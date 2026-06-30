@@ -142,7 +142,13 @@ claude mcp add baltamatica -- /path/to/baltamatica.mcp/.venv/bin/python -m balta
 如果暂时没有 C 编译环境，可以使用 CLI 后端启动：
 
 ```bash
-python -m baltamatica_mcp --backend cli
+BALTAMATICA_CLI=/path/to/baltamaticaC.sh python -m baltamatica_mcp --backend cli
+```
+
+也可以直接通过参数指定北太天元命令行入口和单次执行超时：
+
+```bash
+python -m baltamatica_mcp --backend cli --cli-executable /path/to/baltamaticaC.sh --timeout 30
 ```
 
 ---
