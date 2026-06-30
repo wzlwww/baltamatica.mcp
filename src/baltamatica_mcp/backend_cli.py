@@ -4,16 +4,31 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from baltamatica_mcp.engine import ExecutionResult, EngineUnavailableError
+from baltamatica_mcp.engine import (
+    ExecutionResult,
+    EngineUnavailableError,
+    VariableInfo,
+    VariableListResult,
+)
 
 DEFAULT_EXECUTABLE = "baltamaticaC.sh"
 ENV_EXECUTABLE = "BALTAMATICA_CLI"
+VAR_NAME_PATTERN = re.compile(r"^[A-Za-z]\w*$")
+WHOS_ROW_PATTERN = re.compile(
+    r"^\s*(?P<name>[A-Za-z]\w*)\s+"
+    r"(?P<size>\S+)\s+"
+    r"(?P<bytes>\d+)\s+"
+    r"(?P<class_name>\S+)"
+    r"(?:\s+(?P<attributes>.*?))?\s*$"
+)
 
 
 @dataclass(frozen=True)
@@ -30,20 +45,47 @@ class CliEngine:
 
     backend = "cli"
 
-    def __init__(self, executable: str | None = None, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        executable: str | None = None,
+        timeout: float = 30.0,
+        state_file: str | Path | None = None,
+    ) -> None:
         self._configured_executable = executable
         self.timeout = timeout
+        self.state_file = Path(state_file) if state_file else _default_state_file()
 
     async def execute_code(self, code: str) -> ExecutionResult:
-        process = await self._run_cli([self._resolve_executable(), "-nodesktop", "-s", code])
-        output = _combine_output(process.stdout, process.stderr)
-        if process.returncode != 0:
-            return ExecutionResult(success=False, output=output, error=_process_error(process))
-        return ExecutionResult(success=True, output=output)
+        return await self._execute_command(self._wrap_stateful_code(code))
 
     async def run_script(self, file_path: str) -> ExecutionResult:
         script_command = f"run('{_escape_baltamatica_string(Path(file_path).as_posix())}')"
         return await self.execute_code(script_command)
+
+    async def clear_workspace(self) -> ExecutionResult:
+        if self.state_file.exists():
+            self.state_file.unlink()
+        return await self._execute_command("clear")
+
+    async def list_variables(self) -> VariableListResult:
+        result = await self._execute_command(self._wrap_readonly_code("whos"))
+        if not result.success:
+            return VariableListResult(
+                success=False,
+                variables=[],
+                output=result.output,
+                error=result.error,
+            )
+        return VariableListResult(
+            success=True,
+            variables=parse_whos_output(result.output),
+            output=result.output,
+        )
+
+    async def get_variable(self, name: str) -> ExecutionResult:
+        if not VAR_NAME_PATTERN.match(name):
+            raise ValueError(f"Invalid variable name: {name}")
+        return await self._execute_command(self._wrap_readonly_code(f"disp({name})"))
 
     def _resolve_executable(self) -> str:
         configured = self._configured_executable or os.environ.get(ENV_EXECUTABLE)
@@ -51,14 +93,18 @@ class CliEngine:
             path = Path(configured).expanduser()
             if path.is_absolute() or len(path.parts) > 1:
                 if not path.exists():
-                    raise EngineUnavailableError(f"Baltamatica CLI executable does not exist: {path}")
+                    raise EngineUnavailableError(
+                        f"Baltamatica CLI executable does not exist: {path}"
+                    )
                 if not path.is_file():
                     raise EngineUnavailableError(f"Baltamatica CLI path is not a file: {path}")
                 return str(path)
             resolved = shutil.which(configured)
             if resolved:
                 return resolved
-            raise EngineUnavailableError(f"Baltamatica CLI executable not found on PATH: {configured}")
+            raise EngineUnavailableError(
+                f"Baltamatica CLI executable not found on PATH: {configured}"
+            )
 
         resolved = shutil.which(DEFAULT_EXECUTABLE)
         if resolved:
@@ -70,6 +116,25 @@ class CliEngine:
     async def _run_cli(self, argv: Sequence[str]) -> CliProcessResult:
         return await asyncio.to_thread(self._run_cli_sync, argv)
 
+    async def _execute_command(self, code: str) -> ExecutionResult:
+        process = await self._run_cli([self._resolve_executable(), "-nodesktop", "-s", code])
+        output = _combine_output(process.stdout, process.stderr)
+        if process.returncode != 0:
+            return ExecutionResult(success=False, output=output, error=_process_error(process))
+        return ExecutionResult(success=True, output=output)
+
+    def _wrap_stateful_code(self, code: str) -> str:
+        state_path = _escape_baltamatica_string(self.state_file.as_posix())
+        return (
+            f"if exist('{state_path}','file'), load('{state_path}'); end; "
+            f"{code}; "
+            f"save('{state_path}');"
+        )
+
+    def _wrap_readonly_code(self, code: str) -> str:
+        state_path = _escape_baltamatica_string(self.state_file.as_posix())
+        return f"if exist('{state_path}','file'), load('{state_path}'); end; {code};"
+
     def _run_cli_sync(self, argv: Sequence[str]) -> CliProcessResult:
         try:
             process = subprocess.run(
@@ -80,7 +145,9 @@ class CliEngine:
                 timeout=self.timeout,
             )
         except subprocess.TimeoutExpired as exc:
-            raise TimeoutError(f"Baltamatica CLI timed out after {self.timeout:g} seconds.") from exc
+            raise TimeoutError(
+                f"Baltamatica CLI timed out after {self.timeout:g} seconds."
+            ) from exc
         except OSError as exc:
             raise EngineUnavailableError(f"Failed to start Baltamatica CLI: {exc}") from exc
 
@@ -108,3 +175,27 @@ def _process_error(process: CliProcessResult) -> str:
 
 def _escape_baltamatica_string(value: str) -> str:
     return value.replace("'", "''")
+
+
+def _default_state_file() -> Path:
+    return Path(
+        tempfile.NamedTemporaryFile(prefix="baltamatica_mcp_", suffix=".mat", delete=True).name
+    )
+
+
+def parse_whos_output(output: str) -> list[VariableInfo]:
+    variables: list[VariableInfo] = []
+    for line in output.splitlines():
+        match = WHOS_ROW_PATTERN.match(line)
+        if not match:
+            continue
+        variables.append(
+            VariableInfo(
+                name=match.group("name"),
+                size=match.group("size"),
+                bytes=int(match.group("bytes")),
+                class_name=match.group("class_name"),
+                attributes=(match.group("attributes") or "").strip(),
+            )
+        )
+    return variables

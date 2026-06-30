@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from baltamatica_mcp.backend_cli import CliEngine
+from baltamatica_mcp.backend_cli import CliEngine, parse_whos_output
 from baltamatica_mcp.engine import EngineUnavailableError, create_engine
 
 
@@ -37,13 +37,16 @@ def test_execute_code_runs_baltamatica_cli(tmp_path: Path) -> None:
         "#!/bin/sh\n"
         "printf 'argv:%s\\n' \"$*\"\n",
     )
-    engine = CliEngine(executable=str(executable), timeout=2)
+    state_file = tmp_path / "state.mat"
+    engine = CliEngine(executable=str(executable), timeout=2, state_file=state_file)
 
     result = run(engine.execute_code("disp(1 + 1)"))
 
     assert result.success is True
     assert result.error is None
-    assert "argv:-nodesktop -s disp(1 + 1)" in result.output
+    assert "argv:-nodesktop -s" in result.output
+    assert "disp(1 + 1)" in result.output
+    assert f"save('{state_file.as_posix()}')" in result.output
 
 
 def test_execute_code_returns_nonzero_exit_as_failed_result(tmp_path: Path) -> None:
@@ -53,7 +56,7 @@ def test_execute_code_returns_nonzero_exit_as_failed_result(tmp_path: Path) -> N
         "echo 'bad code' >&2\n"
         "exit 7\n",
     )
-    engine = CliEngine(executable=str(executable), timeout=2)
+    engine = CliEngine(executable=str(executable), timeout=2, state_file=tmp_path / "state.mat")
 
     result = run(engine.execute_code("bad"))
 
@@ -70,13 +73,13 @@ def test_run_script_uses_run_command_with_escaped_path(tmp_path: Path) -> None:
     )
     script_path = tmp_path / "name'with quote.m"
     script_path.write_text("disp(1)", encoding="utf-8")
-    engine = CliEngine(executable=str(executable), timeout=2)
+    engine = CliEngine(executable=str(executable), timeout=2, state_file=tmp_path / "state.mat")
 
     result = run(engine.run_script(str(script_path)))
 
     assert result.success is True
     escaped_path = script_path.as_posix().replace("'", "''")
-    assert result.output == f"run('{escaped_path}')"
+    assert f"run('{escaped_path}')" in result.output
 
 
 def test_missing_configured_executable_raises_unavailable(tmp_path: Path) -> None:
@@ -126,3 +129,78 @@ def test_path_lookup_uses_command_name(tmp_path: Path, monkeypatch: pytest.Monke
 
     assert result.success is True
     assert result.output == "path-lookup"
+
+
+def test_clear_workspace_removes_state_file(tmp_path: Path) -> None:
+    executable = write_executable(
+        tmp_path / "fake-baltamatica",
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$3\"\n",
+    )
+    state_file = tmp_path / "state.mat"
+    state_file.write_text("state", encoding="utf-8")
+    engine = CliEngine(executable=str(executable), timeout=2, state_file=state_file)
+
+    result = run(engine.clear_workspace())
+
+    assert result.success is True
+    assert result.output == "clear"
+    assert not state_file.exists()
+
+
+def test_list_variables_parses_whos_output(tmp_path: Path) -> None:
+    executable = write_executable(
+        tmp_path / "fake-baltamatica",
+        "#!/bin/sh\n"
+        "cat <<'EOF'\n"
+        "  Name  Size  Bytes  Class   Attributes\n"
+        "\n"
+        "  A     2x2      32  double\n"
+        "  label 1x5      10  char    global\n"
+        "EOF\n",
+    )
+    engine = CliEngine(executable=str(executable), timeout=2, state_file=tmp_path / "state.mat")
+
+    result = run(engine.list_variables())
+
+    assert result.success is True
+    assert [variable.name for variable in result.variables] == ["A", "label"]
+    assert result.variables[0].size == "2x2"
+    assert result.variables[0].bytes == 32
+    assert result.variables[0].class_name == "double"
+    assert result.variables[1].attributes == "global"
+
+
+def test_get_variable_uses_readonly_disp_command(tmp_path: Path) -> None:
+    executable = write_executable(
+        tmp_path / "fake-baltamatica",
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$3\"\n",
+    )
+    state_file = tmp_path / "state.mat"
+    engine = CliEngine(executable=str(executable), timeout=2, state_file=state_file)
+
+    result = run(engine.get_variable("A"))
+
+    assert result.success is True
+    assert "disp(A)" in result.output
+    assert "save(" not in result.output
+
+
+def test_get_variable_rejects_invalid_name(tmp_path: Path) -> None:
+    engine = CliEngine(executable=str(tmp_path / "fake"), timeout=2)
+
+    with pytest.raises(ValueError, match="Invalid variable name"):
+        run(engine.get_variable("A; clear"))
+
+
+def test_parse_whos_output_ignores_non_rows() -> None:
+    variables = parse_whos_output(
+        "  Name  Size  Bytes  Class   Attributes\n"
+        "\n"
+        "  A     2x2      32  double\n"
+        "not a row\n"
+        "  b     1x1       8  double\n"
+    )
+
+    assert [variable.name for variable in variables] == ["A", "b"]

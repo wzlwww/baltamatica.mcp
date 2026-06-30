@@ -12,6 +12,7 @@ from baltamatica_mcp.engine import (
     BackendName,
     BaltamaticaEngine,
     ExecutionResult,
+    VariableListResult,
     create_engine,
 )
 
@@ -19,6 +20,12 @@ SERVER_NAME = "baltamatica"
 
 
 def _success_response(result: ExecutionResult, backend: BackendName) -> dict[str, object]:
+    response = result.to_dict()
+    response["backend"] = backend
+    return response
+
+
+def _variable_list_response(result: VariableListResult, backend: BackendName) -> dict[str, object]:
     response = result.to_dict()
     response["backend"] = backend
     return response
@@ -80,6 +87,42 @@ def create_mcp_server(engine: BaltamaticaEngine | None = None) -> FastMCP:
             return _error_response(exc, selected_engine.backend)
         return _success_response(result, selected_engine.backend)
 
+    @mcp.tool()
+    async def clear_workspace() -> dict[str, object]:
+        """Clear variables from the Baltamatica workspace state."""
+
+        try:
+            result = await selected_engine.clear_workspace()
+        except Exception as exc:
+            return _error_response(exc, selected_engine.backend)
+        return _success_response(result, selected_engine.backend)
+
+    @mcp.tool()
+    async def list_variables() -> dict[str, object]:
+        """List variables in the Baltamatica workspace state."""
+
+        try:
+            result = await selected_engine.list_variables()
+        except Exception as exc:
+            return _error_response(exc, selected_engine.backend)
+        return _variable_list_response(result, selected_engine.backend)
+
+    @mcp.tool()
+    async def get_variable(name: str) -> dict[str, object]:
+        """Return a display representation of one Baltamatica variable."""
+
+        if not name.strip():
+            return _error_response(
+                ValueError("Variable name cannot be empty."),
+                selected_engine.backend,
+            )
+
+        try:
+            result = await selected_engine.get_variable(name.strip())
+        except Exception as exc:
+            return _error_response(exc, selected_engine.backend)
+        return _success_response(result, selected_engine.backend)
+
     return mcp
 
 
@@ -108,6 +151,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=30.0,
         help="Seconds to wait for each Baltamatica CLI command.",
     )
+    parser.add_argument(
+        "--state-file",
+        default=None,
+        help="Optional .mat file used to persist CLI backend workspace state.",
+    )
     return parser
 
 
@@ -119,6 +167,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.backend,
         cli_executable=args.cli_executable,
         timeout=args.timeout,
+        state_file=args.state_file,
     )
     create_mcp_server(engine).run(transport=args.transport)
 

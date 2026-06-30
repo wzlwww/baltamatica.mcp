@@ -151,6 +151,13 @@ BALTAMATICA_CLI=/path/to/baltamaticaC.sh python -m baltamatica_mcp --backend cli
 python -m baltamatica_mcp --backend cli --cli-executable /path/to/baltamaticaC.sh --timeout 30
 ```
 
+CLI 后端会用 `.mat` 状态文件在多次 MCP 调用之间保存工作区变量。默认使用临时状态文件，
+也可以显式指定：
+
+```bash
+python -m baltamatica_mcp --backend cli --state-file /tmp/baltamatica-mcp-state.mat
+```
+
 ---
 
 ## 📁 项目结构
@@ -214,10 +221,11 @@ baltamatica.mcp/
 
 ### Phase 1：项目骨架 & CLI Fallback 后端
 - [x] 项目结构初始化
-- [ ] Python MCP Server 骨架（`FastMCP`）
-- [ ] CLI 后端实现（`subprocess` + `baltamaticaC.sh -nodesktop -s`）
-- [ ] `execute_code` / `run_script` 工具
-- [ ] 基本单元测试
+- [x] Python MCP Server 骨架（`FastMCP`）
+- [x] CLI 后端实现（`subprocess` + `baltamaticaC.sh -nodesktop -s`）
+- [x] `execute_code` / `run_script` 工具
+- [x] `list_variables` / `get_variable` / `clear_workspace` 工具（CLI 基础版）
+- [x] 基本单元测试
 
 ### Phase 2：BEX 桥接插件（核心）
 - [ ] C 语言 BEX 插件：TCP Socket 监听线程
