@@ -43,7 +43,16 @@ The bridge accepts a debug lifecycle request:
 {"id":"shutdown","method":"shutdown","params":{}}
 ```
 
-The integration tests use this request to release the GUI command window.
+The repository includes a small helper that sends this request and waits until
+the listener port is released:
+
+```bash
+PYTHONPATH=src python -m baltamatica_mcp.bex_shutdown
+```
+
+Use `--host`, `--port`, `--attempts`, and `--timeout` when the bridge is running
+on a non-default address. The GUI command window may not stop reliably with
+Ctrl+C because the BEX function is blocked inside the TCP accept loop.
 
 ## Status Check
 

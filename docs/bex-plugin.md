@@ -8,9 +8,9 @@ process and speaks the JSON-over-TCP protocol from `docs/bex-protocol.md`.
 
 Implemented:
 
-- `execute_code`: evaluates the request `code` with `bxEvalString`.
-- `run_script`: evaluates `run('<file_path>')`.
-- `clear_workspace`: evaluates `clear`.
+- `execute_code`: evaluates the request `code` through Baltamatica `eval`.
+- `run_script`: evaluates `run('<file_path>')` through Baltamatica `eval`.
+- `clear_workspace`: evaluates `clear` through Baltamatica `eval`.
 - `list_variables`: enumerates workspace variables with SDK metadata.
 - `get_variable`: returns text output plus structured JSON for small real
   numeric/logical arrays.
@@ -88,7 +88,14 @@ For development, send a newline-delimited JSON `shutdown` request:
 {"id":"stop","method":"shutdown","params":{}}
 ```
 
-You can also interrupt or close the dedicated Baltamatica session.
+From the repository checkout, the same request can be sent with:
+
+```bash
+PYTHONPATH=src python -m baltamatica_mcp.bex_shutdown
+```
+
+The command retries briefly and exits successfully only after the TCP listener
+has released its port. You can also close the dedicated Baltamatica session.
 
 ## SDK Notes
 
@@ -97,10 +104,10 @@ The source follows the Baltamatica SDK manual API v3.9:
 - BEX entry point:
   `void bexFunction(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[])`
 - Command evaluation:
-  `int bxEvalString(const char *expr)`
+  `bxCallBaltamatica(..., "eval")`
 - Error reporting for invalid BEX invocation:
   `bxErrMsgTxt(...)`
 
-`bxEvalString` reports only success or failure, so command responses do not
-capture console output yet. Variable reads use SDK workspace APIs and include a
-bounded structured `value` payload for supported small arrays.
+Command responses report only success or failure, so they do not capture console
+output yet. Variable reads use SDK workspace APIs and include a bounded
+structured `value` payload for supported small arrays.
