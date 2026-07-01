@@ -29,6 +29,19 @@ addpath('/path/to/baltamatica.mcp'); mcp_bridge(31416)
 While the bridge is running, the GUI command window is occupied by the BEX
 function. This is expected. MCP requests are sent from another process over TCP.
 
+Experimental background mode starts the listener on a worker thread and returns
+the GUI command prompt immediately:
+
+```matlab
+addpath('/path/to/baltamatica.mcp'); mcp_bridge('background')
+addpath('/path/to/baltamatica.mcp'); mcp_bridge('background', 31416)
+```
+
+This mode is intended for lifecycle testing. It makes `mcp_bridge('stop')`
+callable from the same GUI session, but request handling also runs on the worker
+thread and must be verified carefully for workspace, `eval`, and plotting
+behavior.
+
 Start the MCP server with the matching port:
 
 ```bash
@@ -37,19 +50,28 @@ PYTHONPATH=src python -m baltamatica_mcp --backend bex --bex-host 127.0.0.1 --be
 
 ## Stop
 
-If the GUI command prompt is available, the BEX function can send a shutdown
-request to an already running bridge:
+Once the GUI command prompt is available, stop a running bridge with:
 
 ```matlab
 mcp_bridge('stop')
 mcp_bridge('stop', 31416)
 ```
 
-This is useful after Ctrl+C returns the prompt but leaves the bridge listener
-alive. It cannot run from the same command window while `mcp_bridge()` is still
-blocking that prompt. The command sends the shutdown request and returns without
-waiting for a response, because Ctrl+C can leave the listener in a state where a
-TCP connection succeeds but no bridge loop is still accepting requests.
+The bridge tracks its listening socket in process-global state, so `stop`
+resolves the situation directly instead of relying on a live accept loop:
+
+- **After Ctrl+C on a foreground `mcp_bridge()`** the accept loop is gone but the
+  socket is still open. `stop` closes that socket directly and releases the port.
+- **For a `mcp_bridge('background')` listener** `stop` wakes the worker's accept
+  loop over the wire so it exits and cleans up.
+- **For a bridge in another process/session** `stop` falls back to sending the
+  shutdown request over TCP.
+
+`stop` cannot run from the same command window while a foreground `mcp_bridge()`
+is still blocking that prompt — press Ctrl+C first, or start the listener with
+`mcp_bridge('background')` so the prompt stays free. Each command optionally
+returns a numeric status (`0` = ok) as its single output, e.g.
+`s = mcp_bridge('stop')`.
 
 The bridge accepts a debug lifecycle request:
 
@@ -115,9 +137,12 @@ Older bridge builds could leave the port held by a Baltamatica child process
 after the bridge loop stopped. Rebuild the BEX file and restart Baltamatica so
 new listener sockets are marked close-on-exec.
 
-If Ctrl+C leaves the Baltamatica process itself holding the port and neither
-`mcp_bridge('stop')` nor the Python shutdown helper can release it, restart the
-Baltamatica process or use a different port for the next bridge session.
+After Ctrl+C on a foreground `mcp_bridge()`, the listening socket is tracked in
+process-global state, so `mcp_bridge('stop')` closes it directly and a fresh
+`mcp_bridge()` reclaims the leaked socket instead of failing to bind. Restarting
+Baltamatica should only be necessary if the BEX file was unloaded (for example
+with `clear mcp_bridge`) while the socket was still leaked, since that discards
+the tracked handle.
 
 ### `plot` is undefined
 

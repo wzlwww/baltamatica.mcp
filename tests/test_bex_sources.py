@@ -30,14 +30,19 @@ def test_bex_bridge_implements_sdk_entrypoint_and_minimal_methods() -> None:
     assert 'mcp_print_bridge_message("ready", "at", port)' in source
     assert 'mcp_print_bridge_message("listening", "on", port)' in source
     assert 'mcp_print_bridge_message("stopped", "on", port)' in source
-    assert "fprintf('MCP bridge %s %s %s:%d\\\\n');" in source
+    assert 'bxPrintf(' in source
+    assert '"MCP bridge %s %s %s:%d\\n"' in source
     assert "mcp_array_is_stop_command" in source
     assert "bxGetCharsRO(value)" in source
     assert "bxIsString(value)" in source
     assert "mcp_send_shutdown_request" in source
     assert "mcp_set_close_on_exec(server_fd)" in source
+    assert "mcp_array_is_background_command" in source
+    assert "mcp_start_background_bridge" in source
+    assert "mcp_background_thread_main" in source
+    assert 'mcp_print_bridge_text("background listening on", port)' in source
     assert 'const char *request = "{\\"id\\":\\"stop\\",\\"method\\":\\"shutdown\\",\\"params\\":{}}\\n";' in source
-    assert "mcp_bridge('stop') accepts at most one optional port argument." in source
+    assert "mcp_bridge('%s') accepts at most one optional port argument." in source
 
 
 def test_bex_protocol_header_matches_python_defaults() -> None:
@@ -56,8 +61,10 @@ def test_bex_cmake_uses_baltamatica_sdk_helper() -> None:
     cmake = read_repo_file("bex/CMakeLists.txt")
 
     assert "find_package(Baltamatica 4.1 REQUIRED)" in cmake
+    assert "find_package(Threads REQUIRED)" in cmake
     assert "add_baltamatica_bex(mcp_bridge mcp_bridge.c)" in cmake
     assert "target_link_libraries(mcp_bridge PRIVATE ws2_32)" in cmake
+    assert "target_link_libraries(mcp_bridge PRIVATE Threads::Threads)" in cmake
 
 
 def test_bex_plugin_documentation_covers_manual_workflow() -> None:

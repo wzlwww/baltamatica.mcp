@@ -5,13 +5,23 @@
  *   bex "mcp_bridge.c"
  *
  * Start from Baltamatica:
- *   mcp_bridge              % listens on 127.0.0.1:31415
- *   mcp_bridge(43141)       % listens on 127.0.0.1:43141
+ *   mcp_bridge              % foreground, listens on 127.0.0.1:31415 (blocks)
+ *   mcp_bridge(43141)       % foreground on 127.0.0.1:43141
+ *   mcp_bridge('background') % detached listener, frees the command line
  *
- * The bridge is intentionally blocking. Run it in a dedicated Baltamatica
- * session, then point the MCP server at the same host and port. Variable
- * reads include text output plus structured JSON for small real numeric and
- * logical arrays.
+ * Stop from Baltamatica:
+ *   mcp_bridge('stop')       % stops a running bridge (default port)
+ *   mcp_bridge('stop', 43141)
+ *
+ * The foreground form blocks the command line. If it is interrupted with
+ * Ctrl-C, the listening socket is tracked in process-global state so a later
+ * mcp_bridge('stop') closes it directly (releasing the port) and a later
+ * mcp_bridge() reclaims it instead of failing to bind. A background bridge is
+ * stopped by waking its accept loop over the wire. Every command optionally
+ * returns a numeric status (0 = ok) as its single output argument.
+ *
+ * Variable reads include text output plus structured JSON for small real
+ * numeric and logical arrays.
  */
 
 #include "bex/bex.h"
@@ -32,6 +42,7 @@
 #include <ws2tcpip.h>
 #pragma comment(lib, "Ws2_32.lib")
 typedef SOCKET mcp_socket_t;
+typedef HANDLE mcp_thread_t;
 #define MCP_INVALID_SOCKET INVALID_SOCKET
 #define mcp_close_socket closesocket
 #else
@@ -39,9 +50,11 @@ typedef SOCKET mcp_socket_t;
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include <unistd.h>
 typedef int mcp_socket_t;
+typedef pthread_t mcp_thread_t;
 #define MCP_INVALID_SOCKET (-1)
 #define mcp_close_socket close
 #endif
@@ -60,8 +73,30 @@ typedef struct mcp_request_t {
     char name[BALTAMATICA_MCP_MAX_METHOD];
 } mcp_request_t;
 
+/*
+ * Unified, process-global state for the single listening bridge. Tracking the
+ * server socket globally (instead of in a local variable of the accept loop)
+ * lets `mcp_bridge('stop')` release the port even when the foreground accept
+ * loop has already been torn down by Ctrl-C, and lets a fresh `mcp_bridge()`
+ * reclaim a leaked socket instead of failing to bind.
+ */
+static volatile int mcp_server_active = 0;      /* a bridge is currently listening */
+static volatile int mcp_server_background = 0;  /* it runs on a detached thread */
+static volatile int mcp_server_port = 0;
+static volatile int mcp_server_stop = 0;        /* request the accept loop to exit */
+static mcp_socket_t mcp_server_fd = MCP_INVALID_SOCKET;
+static mcp_thread_t mcp_background_thread;
+
 static int mcp_socket_valid(mcp_socket_t socket_fd) {
     return socket_fd != MCP_INVALID_SOCKET;
+}
+
+static void mcp_server_state_clear(void) {
+    mcp_server_fd = MCP_INVALID_SOCKET;
+    mcp_server_port = 0;
+    mcp_server_active = 0;
+    mcp_server_background = 0;
+    mcp_server_stop = 0;
 }
 
 static int mcp_socket_startup(void) {
@@ -90,13 +125,19 @@ static void mcp_set_close_on_exec(mcp_socket_t socket_fd) {
 #endif
 }
 
-static int mcp_validate_no_outputs(int nlhs, bxArray *plhs[]) {
+static int mcp_validate_outputs(int nlhs, bxArray *plhs[]) {
     (void)plhs;
-    if (nlhs > 0) {
-        bxErrMsgTxt("mcp_bridge does not return output arguments.");
+    if (nlhs > 1) {
+        bxErrMsgTxt("mcp_bridge returns at most one status value.");
         return -1;
     }
     return 0;
+}
+
+static void mcp_set_status_output(int nlhs, bxArray *plhs[], double status) {
+    if (nlhs > 0) {
+        plhs[0] = bxCreateDoubleScalar(status);
+    }
 }
 
 static int mcp_parse_port_arg(const bxArray *arg) {
@@ -118,7 +159,7 @@ static int mcp_parse_port_arg(const bxArray *arg) {
 }
 
 static int mcp_parse_port(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[]) {
-    if (mcp_validate_no_outputs(nlhs, plhs) != 0) {
+    if (mcp_validate_outputs(nlhs, plhs) != 0) {
         return -1;
     }
     if (nrhs > 1) {
@@ -131,7 +172,7 @@ static int mcp_parse_port(int nlhs, bxArray *plhs[], int nrhs, const bxArray *pr
     return mcp_parse_port_arg(prhs[0]);
 }
 
-static int mcp_array_is_stop_command(const bxArray *value) {
+static int mcp_array_command_equals(const bxArray *value, const char *expected) {
     char raw[64];
     char normalized[16];
     size_t out_index = 0;
@@ -166,21 +207,39 @@ static int mcp_array_is_stop_command(const bxArray *value) {
         }
     }
     normalized[out_index] = '\0';
-    return strcmp(normalized, "stop") == 0;
+    return strcmp(normalized, expected) == 0;
 }
 
-static int mcp_parse_stop_port(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[]) {
-    if (mcp_validate_no_outputs(nlhs, plhs) != 0) {
+static int mcp_array_is_stop_command(const bxArray *value) {
+    return mcp_array_command_equals(value, "stop");
+}
+
+static int mcp_array_is_background_command(const bxArray *value) {
+    return mcp_array_command_equals(value, "background") || mcp_array_command_equals(value, "bg");
+}
+
+static int mcp_parse_command_port(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[], const char *command) {
+    if (mcp_validate_outputs(nlhs, plhs) != 0) {
         return -1;
     }
     if (nrhs > 2) {
-        bxErrMsgTxt("mcp_bridge('stop') accepts at most one optional port argument.");
+        char message[128];
+        snprintf(message, sizeof(message), "mcp_bridge('%s') accepts at most one optional port argument.", command);
+        bxErrMsgTxt(message);
         return -1;
     }
     if (nrhs == 1) {
         return BALTAMATICA_MCP_DEFAULT_PORT;
     }
     return mcp_parse_port_arg(prhs[1]);
+}
+
+static int mcp_parse_stop_port(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[]) {
+    return mcp_parse_command_port(nlhs, plhs, nrhs, prhs, "stop");
+}
+
+static int mcp_parse_background_port(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[]) {
+    return mcp_parse_command_port(nlhs, plhs, nrhs, prhs, "background");
 }
 
 static const char *mcp_skip_ws(const char *cursor) {
@@ -458,28 +517,16 @@ static void mcp_escape_baltamatica_string(const char *input, char *output, size_
 }
 
 static void mcp_print_bridge_message(const char *phase, const char *preposition, int port) {
-    char command[256];
-    snprintf(
-        command,
-        sizeof(command),
-        "fprintf('MCP bridge %s %s %s:%d\\n');",
+    (void)bxPrintf(
+        "MCP bridge %s %s %s:%d\n",
         phase,
         preposition,
         BALTAMATICA_MCP_DEFAULT_HOST,
         port);
-    (void)bxEvalString(command);
 }
 
 static void mcp_print_bridge_text(const char *message, int port) {
-    char command[256];
-    snprintf(
-        command,
-        sizeof(command),
-        "fprintf('MCP bridge %s %s:%d\\n');",
-        message,
-        BALTAMATICA_MCP_DEFAULT_HOST,
-        port);
-    (void)bxEvalString(command);
+    (void)bxPrintf("MCP bridge %s %s:%d\n", message, BALTAMATICA_MCP_DEFAULT_HOST, port);
 }
 
 static int mcp_eval_command(const char *command) {
@@ -510,6 +557,30 @@ static int mcp_is_valid_variable_name(const char *name) {
         }
     }
     return 1;
+}
+
+/*
+ * Report whether a variable exists in the base workspace without evaluating it.
+ * Reading a value still requires bxEvalIn (there is no direct value getter), but
+ * bxEvalIn echoes its error to the GUI command window when the name is missing.
+ * Callers use this to avoid that echo for absent variables.
+ */
+static int mcp_variable_exists(const char *name) {
+    const char **names = NULL;
+    int count = 0;
+    int found = 0;
+
+    bxGetVariableNames(&names, &count);
+    for (int i = 0; names != NULL && i < count; ++i) {
+        if (names[i] != NULL && strcmp(names[i], name) == 0) {
+            found = 1;
+            break;
+        }
+    }
+    if (names != NULL) {
+        bxFreeVariableNames(names);
+    }
+    return found;
 }
 
 static int mcp_lookup_variable(const char *name, bxArray **value) {
@@ -895,7 +966,7 @@ static void mcp_send_variable_list(mcp_socket_t client_fd, const char *id) {
     mcp_send_text(client_fd, "]}\n");
 }
 
-static void mcp_handle_request(mcp_socket_t client_fd, const mcp_request_t *request, int *stop_server, int port) {
+static void mcp_handle_request(mcp_socket_t client_fd, const mcp_request_t *request, volatile int *stop_server, int port) {
     if (strcmp(request->method, BALTAMATICA_MCP_METHOD_STATUS) == 0) {
         mcp_send_status(client_fd, request->id, port);
         return;
@@ -959,6 +1030,12 @@ static void mcp_handle_request(mcp_socket_t client_fd, const mcp_request_t *requ
             mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_BAD_REQUEST, "Invalid variable name.");
             return;
         }
+        if (!mcp_variable_exists(request->name)) {
+            /* Report the miss without calling bxEvalIn, which would echo an
+             * "undefined variable" error to the GUI command window. */
+            mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_VARIABLE, "Variable does not exist.");
+            return;
+        }
         if (mcp_lookup_variable(request->name, &value) != 0 || value == NULL) {
             mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_VARIABLE, "Variable lookup failed.");
             return;
@@ -983,7 +1060,7 @@ static void mcp_handle_request(mcp_socket_t client_fd, const mcp_request_t *requ
         "Unsupported BEX bridge method.");
 }
 
-static void mcp_handle_client(mcp_socket_t client_fd, int *stop_server, int port) {
+static void mcp_handle_client(mcp_socket_t client_fd, volatile int *stop_server, int port) {
     char line[BALTAMATICA_MCP_MAX_LINE];
     while (!*stop_server) {
         int status = mcp_recv_line(client_fd, line, sizeof(line));
@@ -1009,12 +1086,12 @@ static void mcp_handle_client(mcp_socket_t client_fd, int *stop_server, int port
     }
 }
 
-static int mcp_listen_loop(int port) {
+static int mcp_open_server_socket(int port, mcp_socket_t *server_fd_out) {
     struct sockaddr_in address;
     mcp_socket_t server_fd = MCP_INVALID_SOCKET;
-    int stop_server = 0;
     int reuse = 1;
 
+    *server_fd_out = MCP_INVALID_SOCKET;
     if (!mcp_socket_startup()) {
         bxErrMsgTxt("Failed to initialize socket runtime.");
         return 1;
@@ -1049,20 +1126,125 @@ static int mcp_listen_loop(int port) {
         return 1;
     }
 
-    mcp_print_bridge_message("listening", "on", port);
+    *server_fd_out = server_fd;
+    return 0;
+}
 
-    while (!stop_server) {
+static int mcp_serve_socket(mcp_socket_t server_fd, int port, int print_stopped) {
+    while (!mcp_server_stop) {
         mcp_socket_t client_fd = accept(server_fd, NULL, NULL);
-        if (!mcp_socket_valid(client_fd)) {
-            continue;
+        if (mcp_server_stop) {
+            if (mcp_socket_valid(client_fd)) {
+                mcp_close_socket(client_fd);
+            }
+            break;
         }
-        mcp_handle_client(client_fd, &stop_server, port);
+        if (!mcp_socket_valid(client_fd)) {
+            /* accept() failed, most likely because the listening socket was
+             * closed by a stop request. Leave the loop instead of spinning. */
+            break;
+        }
+        mcp_handle_client(client_fd, &mcp_server_stop, port);
         mcp_close_socket(client_fd);
     }
 
     mcp_close_socket(server_fd);
     mcp_socket_cleanup();
-    mcp_print_bridge_message("stopped", "on", port);
+    mcp_server_state_clear();
+    if (print_stopped) {
+        mcp_print_bridge_message("stopped", "on", port);
+    }
+    return 0;
+}
+
+/*
+ * If a foreground bridge is still marked active while we are running on the
+ * interpreter thread, its accept loop cannot actually be running (it would be
+ * blocking this very thread). That means it was aborted with Ctrl-C, leaving
+ * the listening socket open. Close it and clear the state so the port is free.
+ */
+static void mcp_reclaim_dead_foreground(void) {
+    if (mcp_server_active && !mcp_server_background) {
+        if (mcp_socket_valid(mcp_server_fd)) {
+            mcp_close_socket(mcp_server_fd);
+        }
+        mcp_socket_cleanup();
+        mcp_server_state_clear();
+    }
+}
+
+static int mcp_listen_loop(int port) {
+    mcp_socket_t server_fd = MCP_INVALID_SOCKET;
+
+    mcp_reclaim_dead_foreground();
+    if (mcp_server_active) {
+        return 2;
+    }
+    if (mcp_open_server_socket(port, &server_fd) != 0) {
+        return 1;
+    }
+
+    mcp_server_fd = server_fd;
+    mcp_server_port = port;
+    mcp_server_stop = 0;
+    mcp_server_background = 0;
+    mcp_server_active = 1;
+
+    mcp_print_bridge_message("listening", "on", port);
+    return mcp_serve_socket(server_fd, port, 1);
+}
+
+#ifdef _WIN32
+static DWORD WINAPI mcp_background_thread_main(LPVOID ignored) {
+#else
+static void *mcp_background_thread_main(void *ignored) {
+#endif
+    (void)ignored;
+    /* mcp_serve_socket clears the global server state when it exits. */
+    mcp_serve_socket(mcp_server_fd, mcp_server_port, 0);
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+static int mcp_start_background_bridge(int port) {
+    mcp_socket_t server_fd = MCP_INVALID_SOCKET;
+
+    mcp_reclaim_dead_foreground();
+    if (mcp_server_active) {
+        return 2;
+    }
+    if (mcp_open_server_socket(port, &server_fd) != 0) {
+        return 1;
+    }
+
+    mcp_server_fd = server_fd;
+    mcp_server_port = port;
+    mcp_server_stop = 0;
+    mcp_server_background = 1;
+    mcp_server_active = 1;
+
+#ifdef _WIN32
+    mcp_background_thread = CreateThread(NULL, 0, mcp_background_thread_main, NULL, 0, NULL);
+    if (mcp_background_thread == NULL) {
+        mcp_close_socket(server_fd);
+        mcp_socket_cleanup();
+        mcp_server_state_clear();
+        return 1;
+    }
+    CloseHandle(mcp_background_thread);
+#else
+    if (pthread_create(&mcp_background_thread, NULL, mcp_background_thread_main, NULL) != 0) {
+        mcp_close_socket(server_fd);
+        mcp_socket_cleanup();
+        mcp_server_state_clear();
+        return 1;
+    }
+    pthread_detach(mcp_background_thread);
+#endif
+
     return 0;
 }
 
@@ -1108,6 +1290,44 @@ static int mcp_send_shutdown_request(int port) {
     return 0;
 }
 
+/*
+ * Stop a running bridge. Returns:
+ *   0  a bridge was stopped (or a shutdown was delivered over the wire)
+ *   1  nothing was listening on that port
+ *   2  a stop request could not be delivered
+ */
+static int mcp_stop_bridge(int port) {
+    /* A background bridge runs its accept loop on another thread. Wake that
+     * blocked accept() with a real shutdown connection; the worker thread then
+     * observes the stop flag and closes its own socket. */
+    if (mcp_server_active && mcp_server_background && mcp_server_port == port) {
+        mcp_server_stop = 1;
+        return mcp_send_shutdown_request(port) == 0 ? 0 : 2;
+    }
+
+    /* A foreground bridge is tracked but, since we are executing on the
+     * interpreter thread, its accept loop is not running (Ctrl-C). Close the
+     * leaked listening socket directly to release the port. */
+    if (mcp_server_active && !mcp_server_background && mcp_server_port == port) {
+        mcp_server_stop = 1;
+        mcp_reclaim_dead_foreground();
+        return 0;
+    }
+
+    /* Nothing is tracked in this process for that port. Fall back to the wire
+     * protocol in case a bridge is listening in another session or process. */
+    {
+        int status = mcp_send_shutdown_request(port);
+        if (status == 0) {
+            return 0;
+        }
+        if (status == 1) {
+            return 1;
+        }
+        return 2;
+    }
+}
+
 void bexFunction(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[]) {
     int port;
     if (nrhs > 0 && mcp_array_is_stop_command(prhs[0])) {
@@ -1116,14 +1336,33 @@ void bexFunction(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[]) {
         if (port < 0) {
             return;
         }
-        status = mcp_send_shutdown_request(port);
+        status = mcp_stop_bridge(port);
         if (status == 0) {
-            mcp_print_bridge_text("stop requested on", port);
+            mcp_print_bridge_text("stopped on", port);
         } else if (status == 1) {
             mcp_print_bridge_text("is not listening on", port);
         } else {
             mcp_print_bridge_text("stop request failed on", port);
         }
+        mcp_set_status_output(nlhs, plhs, status);
+        return;
+    }
+
+    if (nrhs > 0 && mcp_array_is_background_command(prhs[0])) {
+        int status;
+        port = mcp_parse_background_port(nlhs, plhs, nrhs, prhs);
+        if (port < 0) {
+            return;
+        }
+        status = mcp_start_background_bridge(port);
+        if (status == 0) {
+            mcp_print_bridge_text("background listening on", port);
+        } else if (status == 2) {
+            mcp_print_bridge_text("background already running on", (int)mcp_server_port);
+        } else {
+            mcp_print_bridge_text("background start failed on", port);
+        }
+        mcp_set_status_output(nlhs, plhs, status);
         return;
     }
 
@@ -1132,5 +1371,11 @@ void bexFunction(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[]) {
         return;
     }
     mcp_print_bridge_message("ready", "at", port);
-    (void)mcp_listen_loop(port);
+    {
+        int status = mcp_listen_loop(port);  /* blocks until stopped; 2 = already running */
+        if (status == 2) {
+            mcp_print_bridge_text("already listening on", (int)mcp_server_port);
+        }
+        mcp_set_status_output(nlhs, plhs, status);
+    }
 }
