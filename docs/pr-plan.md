@@ -141,11 +141,11 @@ Out of scope:
 - Binary payload transfer through MCP.
 - Automatic figure capture without an explicit saved file.
 
-### PR6: BEX Protocol Design and Plot Probe
+### PR6: BEX Protocol Design
 
 Branch: `codex/bex-protocol-design`
 
-Goal: define the Python-to-BEX protocol and verify whether a GUI-loaded BEX can reach Baltamatica plotting.
+Goal: define the Python-to-BEX protocol before implementing the C plugin.
 
 Implemented:
 
@@ -163,113 +163,71 @@ Implemented:
   - timeout handling
   - reconnect behavior
 - Add tests with a mock BEX TCP server.
-- Add `bex/bex_plot_probe.c` to test BEX SDK evaluation and `plot` calls.
-- Add `examples/bex_plot_probe_demo.m` for GUI-side verification.
-- Document that headless CLI can load BEX and run non-plot SDK calls, while `plot` is expected to fail there because the plotting stack is not available.
 
 Verification:
 
 - `PYTHONPATH=src pytest -q -m "not integration"`
 - `PYTHONPATH=src python -m compileall -q src tests`
-- `/Applications/Baltamatica.app/Contents/MacOS/bex bex/bex_plot_probe.c`
-- `BALTAMATICA_CLI=/Applications/Baltamatica.app/Contents/MacOS/baltamatica PYTHONPATH=src pytest -q`
-- GUI-loaded `bex_plot_probe()` returns `plot=0` and opens a native Figure window.
 
 Out of scope:
 
-- Long-running BEX TCP bridge.
+- Real C plugin implementation.
 - Binary matrix transfer.
-- Saving or returning plot images.
 
 ### PR7: Minimal BEX Plugin
+
+Branch: `codex/minimal-bex-plugin`
 
 Goal: provide the first real BEX backend path.
 
 Implemented:
 
-- Replace the BEX placeholder with `bex/mcp_bridge.c`.
-- Start a TCP socket listener inside the Baltamatica process that loads the BEX file.
-- Run the listener on the BEX invocation thread so interpreter and GUI plotting APIs are not called from a background pthread.
-- Bind to `127.0.0.1:31415`.
-- Accept newline-delimited JSON requests compatible with `backend_bex.py`.
-- Implement:
-  - `execute_code` through Baltamatica `eval` via `bxCallBaltamatica`
-  - `run_script` through `run('...')`
-  - `clear_workspace` through `clear`
-- Return structured success/error JSON responses.
-- Add integration coverage that compiles `mcp_bridge.c` with the real BEX compiler.
-- Add a real TCP smoke test that starts the bridge, executes code through `BexEngine`, verifies a failure response, and shuts the bridge down.
-- Add a debug-only `shutdown` method for automated bridge smoke tests.
-- Document the GUI bridge startup path in `README.md` and `docs/bex-protocol.md`.
+- Add BEX C plugin files:
+  - `mcp_bridge.c`
+  - protocol header
+  - build configuration
+- Start a blocking loopback TCP socket listener inside a Baltamatica BEX function.
+- Implement `execute_code` via `bxEvalString`.
+- Implement minimal `run_script` and `clear_workspace` via `bxEvalString`.
+- Return structured success/error responses to Python.
+- Add local/manual integration instructions.
+
+Verification:
+
+- `python -m ruff check src tests`
+- `python -m pytest -q`
+- `python -m compileall -q src tests`
 
 Out of scope:
 
 - High-performance binary variable transfer.
-- Capturing console output from evaluated code.
-- Saving or returning GUI figure images.
+- Full workspace serialization.
+- Background listener thread lifecycle management.
+- Capturing console output from `bxEvalString`.
+
+## Planned PRs
 
 ### PR8: BEX Variable Access and Serialization
 
 Goal: make BEX mode feature-complete for variables.
 
-Implemented:
+Proposed implementation:
 
-- Implement `list_variables` in `bex/mcp_bridge.c`:
-  - `bxGetVariableNames`
-  - `bxEvalIn("base", name, &value)` for metadata lookup
-  - dimensions through `bxGetDimensions`
-  - class names through `bxTypeCStr`
-  - estimated bytes for common numeric and logical arrays
-- Implement `get_variable` with validated variable names and `bxArrayToCStr`.
-- Add fixed output limits with a truncation marker for large rendered values.
-- Extend the real BEX TCP integration test to verify:
-  - variable assignment through `execute_code`
-  - `list_variables` includes `A` and `b`
-  - `A` reports `2x2`, `double`, and 32 estimated bytes
-  - `get_variable("A")` returns matrix text
+- Implement `list_variables`.
+- Implement `get_variable` for numeric scalars, vectors, and matrices.
+- Add JSON serialization in `serializer.py`.
+- Add limits for large outputs.
+- Add tests against mock protocol responses and, where available, real BEX.
 
-Verification:
+### PR9: Packaging and Release Readiness
 
-- `BALTAMATICA_CLI=/Applications/Baltamatica.app/Contents/MacOS/baltamatica PYTHONPATH=src pytest -q tests/test_integration_cli.py::test_real_bex_bridge_executes_code_over_tcp`
+Goal: prepare the project for external users.
 
-Out of scope:
+Proposed implementation:
 
-- Binary matrix transfer.
-- Full structured JSON values for arrays, structs, cells, tables, and objects.
-- Capturing console output from arbitrary evaluated code.
-
-## Planned PRs
-
-### PR9: BEX Bridge Usability and Release Notes
-
-Goal: make the experimental BEX bridge easier to start, diagnose, and document.
-
-Implemented:
-
-- Add optional port selection:
-  - `mcp_bridge()` uses `127.0.0.1:31415`
-  - `mcp_bridge(31416)` starts on a custom port
-- Add diagnostic `status` protocol method.
-- Keep `shutdown` documented as the lifecycle release path for tests and GUI use.
-- Add `docs/bex-bridge.md` with:
-  - build instructions
-  - interactive GUI startup instructions
-  - MCP startup command
-  - status and shutdown request examples
-  - plotting notes
-  - troubleshooting for occupied ports, `plot` availability, blocked command
-    window, compiled BEX artifacts, and truncated variable output
-- Update README and protocol docs to link the BEX bridge guide.
-- Extend real BEX TCP integration coverage to start the bridge on a custom
-  port and verify the `status` response.
-
-Verification:
-
-- `/Applications/Baltamatica.app/Contents/MacOS/bex bex/mcp_bridge.c`
-- `BALTAMATICA_CLI=/Applications/Baltamatica.app/Contents/MacOS/baltamatica PYTHONPATH=src pytest -q tests/test_integration_cli.py::test_real_bex_bridge_executes_code_over_tcp`
-
-Out of scope:
-
-- Release packaging for prebuilt BEX binaries.
-- PyPI release metadata polish.
-- Capturing console output from evaluated code.
+- Add release checklist.
+- Add platform-specific installation notes.
+- Add troubleshooting guide for CLI and BEX.
+- Add PyPI metadata polish.
+- Add example MCP configs for Codex, Claude Desktop, and Claude Code.
+- Prepare GitHub Releases layout for future BEX binaries.
