@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import locale
 import os
 import re
 import shutil
@@ -24,6 +25,18 @@ DEFAULT_EXECUTABLE = "baltamaticaC.sh"
 ENV_EXECUTABLE = "BALTAMATICA_CLI"
 ARTIFACT_PREFIX = "BALTAMATICA_ARTIFACT="
 VAR_NAME_PATTERN = re.compile(r"^[A-Za-z]\w*$")
+ANSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
+NOISE_OUTPUT_PATTERNS = (
+    "Failed to delete old log:",
+)
+ERROR_OUTPUT_PATTERNS = (
+    "错误使用函数",
+    "未定义的变量或函数",
+    "未定义的函数",
+    "是未定义的变量或函数",
+    "位于输入的第",
+    "位于文件",
+)
 WHOS_ROW_PATTERN = re.compile(
     r"^\s*(?P<name>[A-Za-z]\w*)\s+"
     r"(?P<size>\S+)\s+"
@@ -129,6 +142,14 @@ class CliEngine:
                 error=_process_error(process),
                 artifacts=artifacts,
             )
+        output_error = detect_baltamatica_error(output)
+        if output_error:
+            return ExecutionResult(
+                success=False,
+                output=output,
+                error=output_error,
+                artifacts=artifacts,
+            )
         return ExecutionResult(success=True, output=output, artifacts=artifacts)
 
     def _wrap_stateful_code(self, code: str) -> str:
@@ -144,12 +165,14 @@ class CliEngine:
         return f"if exist('{state_path}','file'), load('{state_path}'); end; {code};"
 
     def _run_cli_sync(self, argv: Sequence[str]) -> CliProcessResult:
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         try:
             process = subprocess.run(
                 argv,
                 capture_output=True,
                 check=False,
-                text=True,
+                stdin=subprocess.DEVNULL,
+                creationflags=creationflags,
                 timeout=self.timeout,
             )
         except subprocess.TimeoutExpired as exc:
@@ -161,17 +184,38 @@ class CliEngine:
 
         return CliProcessResult(
             returncode=process.returncode,
-            stdout=process.stdout,
-            stderr=process.stderr,
+            stdout=_decode_process_output(process.stdout),
+            stderr=_decode_process_output(process.stderr),
         )
 
 
-def _combine_output(stdout: str, stderr: str) -> str:
-    output = stdout.strip()
-    error_output = stderr.strip()
+def _combine_output(stdout: str | None, stderr: str | None) -> str:
+    output = _clean_process_output(stdout or "")
+    error_output = _clean_process_output(stderr or "")
     if output and error_output:
         return f"{output}\n{error_output}"
     return output or error_output
+
+
+def _decode_process_output(output: bytes | None) -> str:
+    if not output:
+        return ""
+    for encoding in ("utf-8", locale.getpreferredencoding(False), "gbk"):
+        try:
+            return output.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return output.decode("utf-8", errors="replace")
+
+
+def _clean_process_output(output: str) -> str:
+    lines = []
+    for line in _strip_ansi(output).splitlines():
+        stripped = line.strip()
+        if any(stripped.startswith(pattern) for pattern in NOISE_OUTPUT_PATTERNS):
+            continue
+        lines.append(line.rstrip())
+    return "\n".join(lines).strip()
 
 
 def _process_error(process: CliProcessResult) -> str:
@@ -179,6 +223,24 @@ def _process_error(process: CliProcessResult) -> str:
     if message:
         return f"Baltamatica CLI exited with code {process.returncode}: {message}"
     return f"Baltamatica CLI exited with code {process.returncode}."
+
+
+def detect_baltamatica_error(output: str) -> str | None:
+    """Detect Baltamatica error text when the CLI exits with status 0."""
+
+    plain_output = _strip_ansi(output)
+    for pattern in ERROR_OUTPUT_PATTERNS:
+        if pattern in plain_output:
+            first_line = next(
+                (line.strip() for line in plain_output.splitlines() if line.strip()),
+                plain_output.strip(),
+            )
+            return f"Baltamatica reported an error: {first_line}"
+    return None
+
+
+def _strip_ansi(value: str) -> str:
+    return ANSI_PATTERN.sub("", value)
 
 
 def _escape_baltamatica_string(value: str) -> str:

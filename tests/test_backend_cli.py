@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 
 from baltamatica_mcp.backend_bex import BexEngine
-from baltamatica_mcp.backend_cli import CliEngine, parse_artifacts, parse_whos_output
+from baltamatica_mcp.backend_cli import (
+    CliEngine,
+    detect_baltamatica_error,
+    parse_artifacts,
+    parse_whos_output,
+)
 from baltamatica_mcp.engine import EngineUnavailableError, create_engine
 
 
@@ -80,6 +85,35 @@ def test_execute_code_returns_nonzero_exit_as_failed_result(tmp_path: Path) -> N
     assert result.output == "bad code"
     assert result.error == "Baltamatica CLI exited with code 7: bad code"
     assert result.artifacts == []
+
+
+def test_execute_code_decodes_utf8_output_on_windows_codepages(tmp_path: Path) -> None:
+    executable = write_python_executable(
+        tmp_path / "fake-baltamatica",
+        "import sys\n"
+        "sys.stdout.buffer.write('错误使用函数 fprintf\\n'.encode('utf-8'))\n",
+    )
+    engine = CliEngine(executable=str(executable), timeout=10, state_file=tmp_path / "state.mat")
+
+    result = run(engine.execute_code("bad"))
+
+    assert result.success is False
+    assert "错误使用函数 fprintf" in result.output
+    assert result.error == "Baltamatica reported an error: 错误使用函数 fprintf"
+
+
+def test_execute_code_filters_windows_log_cleanup_noise(tmp_path: Path) -> None:
+    executable = write_python_executable(
+        tmp_path / "fake-baltamatica",
+        "print('2')\n"
+        "print('Failed to delete old log: \"C:\\\\temp\\\\old.log\"')\n",
+    )
+    engine = CliEngine(executable=str(executable), timeout=10, state_file=tmp_path / "state.mat")
+
+    result = run(engine.execute_code("disp(1+1)"))
+
+    assert result.success is True
+    assert result.output == "2"
 
 
 def test_execute_code_parses_artifact_marker(tmp_path: Path) -> None:
@@ -250,3 +284,11 @@ def test_parse_artifacts_supports_explicit_type_and_missing_file(tmp_path: Path)
     assert artifacts[0].type == "text/csv"
     assert artifacts[0].exists is False
     assert artifacts[0].size == 0
+
+
+def test_detect_baltamatica_error_strips_ansi_sequences() -> None:
+    output = "\x1b[91m错误使用函数 fprintf\n位于文件 demo.m\x1b[0m"
+
+    assert detect_baltamatica_error(output) == (
+        "Baltamatica reported an error: 错误使用函数 fprintf"
+    )
