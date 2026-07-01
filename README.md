@@ -298,3 +298,10 @@ chore: 更新 CI 配置
 ## 📄 License
 
 MIT License © 2026 [wzlwww](https://github.com/wzlwww)
+## 打包发布 (Release)
+在 Windows 环境下，推荐使用 Python 官方标准工具进行本地打包：
+1. 安装打包工具：
+   pip install build
+2. 运行打包命令：
+   python -m build
+打包完成后，生成的安装包将存放在 `dist/` 目录下。
