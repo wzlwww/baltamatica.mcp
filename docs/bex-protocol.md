@@ -1,9 +1,8 @@
 # BEX Protocol Design
 
 This document defines the JSON protocol used between the Python MCP server and
-the future Baltamatica BEX plugin. It is intentionally small for PR6: the Python
-client can be tested against a mock TCP server, while the real C plugin remains
-out of scope until PR7.
+the Baltamatica BEX plugin. PR6 introduced the protocol and Python client; PR7
+adds the first minimal C bridge in `bex/mcp_bridge.c`.
 
 ## Goals
 
@@ -16,12 +15,14 @@ out of scope until PR7.
 
 - TCP socket, bound to loopback by default.
 - Default host: `127.0.0.1`.
-- Default port: `31415`.
+- Default port: `31415`. The BEX function can be started on another port with
+  `mcp_bridge(31416)`.
 - Encoding: UTF-8.
 - Framing: newline-delimited JSON. Each request and response is one JSON object
   followed by `\n`.
 - Request handling: clients send one request at a time on a connection. The
-  server may support pipelining later, but PR6 does not require it.
+  current C bridge runs its server loop on the BEX invocation thread, handles
+  clients sequentially, and does not support pipelining.
 - Timeout: the Python client applies one timeout to connect, write, and read the
   response.
 
@@ -51,7 +52,7 @@ Failed responses use the same envelope and include `error`.
 ```
 
 For compatibility with simple test servers, the Python client also accepts an
-`error` string. The structured form above is preferred for the real plugin.
+`error` string. The structured form above is preferred for plugin responses.
 
 ## Methods
 
@@ -109,6 +110,9 @@ Response:
 
 Return metadata for variables currently present in the workspace.
 
+Status: implemented in the BEX bridge for base-workspace variables. `bytes` is
+estimated for common numeric and logical arrays.
+
 Request:
 
 ```json
@@ -130,9 +134,12 @@ Response:
 
 ### `get_variable`
 
-Return a display representation of one variable. PR6 keeps the result aligned
-with CLI mode by returning text in `output`; structured JSON values are planned
-for PR8.
+Return a display representation of one variable. The result stays aligned with
+CLI mode by returning text in `output`; structured JSON values are planned for a
+later BEX serialization PR.
+
+Status: implemented with `bxEvalIn("base", name, &value)` and
+`bxArrayToCStr(...)`. Variable names are validated before evaluation.
 
 Request:
 
@@ -144,6 +151,33 @@ Response:
 
 ```json
 {"id":"6","success":true,"output":"1 2\n3 4","artifacts":[]}
+```
+
+### `status`
+
+Return bridge lifecycle information. This is intended for diagnostics and
+integration tests.
+
+Request:
+
+```json
+{"id":"7","method":"status","params":{}}
+```
+
+Response:
+
+```json
+{"id":"7","success":true,"output":"MCP bridge ready","host":"127.0.0.1","port":31415,"artifacts":[]}
+```
+
+### `shutdown`
+
+Ask the bridge server loop to exit and release the GUI command window.
+
+Request:
+
+```json
+{"id":"8","method":"shutdown","params":{}}
 ```
 
 ## Artifact Schema
@@ -166,7 +200,7 @@ Python client treats missing values as `false` and `0`.
 
 ## Error Codes
 
-The real BEX plugin should use stable string codes:
+The BEX plugin should use stable string codes:
 
 | Code | Meaning |
 | --- | --- |
@@ -190,17 +224,21 @@ transport failures as unknown outcome failures, especially for non-idempotent
 
 The protocol is designed around Baltamatica SDK manual API v3.9:
 
-- `execute_code`: `bxEvalString` for command execution, or `bxEvalIn` when a
-  result object must be captured. `bxEvalString` returns `0` on success and `1`
-  on failure, but cannot return expression values.
+- `execute_code`: the PR7 bridge calls Baltamatica's `eval` function through
+  `bxCallBaltamatica(0, NULL, 1, args, "eval")`, which supports statements such
+  as assignments, `disp(...)`, and `clear`.
+- `bxEvalIn` is useful for expression probes that capture a result object, but
+  requesting an output object is not suitable for statements such as assignment
+  or `disp(...)`.
 - `run_script`: evaluate a `run(...)` command or equivalent script execution.
 - `clear_workspace`: evaluate `clear` in the target workspace.
-- `list_variables`: `bxGetVariableNames`, followed by metadata lookup, then
-  `bxFreeVariableNames` to release the returned variable-name array.
-- `get_variable`: evaluate or lookup the variable and format the resulting
+- `list_variables`: `bxGetVariableNames`, followed by `bxEvalIn("base", name,
+  &value)` for metadata lookup, then `bxFreeVariableNames` to release the
+  returned variable-name array.
+- `get_variable`: `bxEvalIn("base", name, &value)` and format the resulting
   `bxArray` with `bxArrayToCStr`.
 
-SDK notes that matter for PR7:
+SDK notes that matter for PR7 and later:
 
 - The interpreter must be running before command and workspace APIs are used.
 - `bxEvalIn` accepts `"base"` and `"caller"` workspace names.
@@ -209,7 +247,29 @@ SDK notes that matter for PR7:
   explicitly execute commands in the base workspace where possible.
 - The SDK manual warns callers to validate command strings themselves; the BEX
   plugin should treat protocol input as untrusted.
-- `bxArrayToCStr` can be slow for large arrays. PR8 should add output limits
-  before using it for full variable serialization.
+- `bxArrayToCStr` can be slow for large arrays. The bridge uses a fixed output
+  buffer and appends a truncation marker when the rendered value is too large.
 
-The exact C implementation, SDK include paths, and build settings belong to PR7.
+## Current C Bridge Status
+
+`bex/mcp_bridge.c` is the current experimental BEX bridge implementation:
+
+- Listens on `127.0.0.1:31415`.
+- Runs the server loop on the BEX invocation thread so interpreter and plotting
+  APIs are not called from a background pthread.
+- Implements `execute_code` by calling Baltamatica `eval` through
+  `bxCallBaltamatica`.
+- Implements `run_script` by evaluating `run('absolute/path.m')`.
+- Implements `clear_workspace` by evaluating `clear;`.
+- Implements `list_variables` with SDK workspace variable names and metadata.
+- Implements `get_variable` with text output from `bxArrayToCStr`.
+- Supports optional startup port selection through `mcp_bridge(port)`.
+- Supports diagnostic `status` and lifecycle `shutdown` protocol methods.
+- Does not capture console output yet; responses currently use an empty
+  `output` field.
+- Does not save or return plot images. When loaded inside the Baltamatica GUI,
+  plotting commands are expected to open native Figure windows.
+- Includes a debug-only `shutdown` method for automated smoke tests.
+
+Because the bridge executes commands received over a TCP socket, it binds to
+loopback only and should not be exposed to a network.
