@@ -36,6 +36,7 @@ def _error_response(error: Exception, backend: BackendName) -> dict[str, object]
         "success": False,
         "output": "",
         "error": str(error),
+        "artifacts": [],
         "backend": backend,
     }
 

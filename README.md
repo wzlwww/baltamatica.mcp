@@ -60,7 +60,7 @@
 | `get_variable` | ✅ `disp()` 文本 | 规划中 |
 | `clear_workspace` | ✅ | 规划中 |
 | 工作区状态保持 | ✅ `.mat` 状态文件 | 规划中，长连接天然保持 |
-| 图像/文件产物反馈 | 规划中 | 规划中 |
+| 图像/文件产物反馈 | ✅ 文件 artifact marker | 规划中 |
 
 ---
 
@@ -207,6 +207,23 @@ baltamatica.mcp/
 | `get_variable` | `name: string` | 获取变量显示值 | ✅ `disp()` 文本 | 规划中 |
 | `clear_workspace` | — | 清空工作区状态 | ✅ | 规划中 |
 
+### 文件产物反馈
+
+脚本可以通过标准输出声明生成的文件产物：
+
+```matlab
+fprintf('BALTAMATICA_ARTIFACT=text/csv:/tmp/result.csv\n');
+```
+
+MCP 返回值会包含 `artifacts` 列表，记录文件路径、MIME 类型、是否存在和文件大小。若省略 MIME 类型：
+
+```matlab
+fprintf('BALTAMATICA_ARTIFACT=/tmp/plot.png\n');
+```
+
+服务会根据扩展名推断常见类型，例如 `image/png`、`application/pdf`、`text/csv`。示例见
+`examples/artifact_export_demo.m`。
+
 ---
 
 ## 🗺️ 开发路线图 (Roadmap)
@@ -222,10 +239,10 @@ baltamatica.mcp/
 - [x] `list_variables` / `get_variable` / `clear_workspace`
 - [x] 可选真实集成测试与 GitHub Actions CI
 - [x] 数值计算示例：`examples/numerical_pipeline_demo.m`
+- [x] 文件产物反馈：`BALTAMATICA_ARTIFACT=...`
 
 ### 下一步
 
-- [ ] 图像/文件产物反馈（Artifact/Image Feedback）
 - [ ] BEX JSON 协议设计
 - [ ] BEX 插件最小可用版
 - [ ] BEX 变量读取与序列化

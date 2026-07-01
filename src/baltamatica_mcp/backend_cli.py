@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from baltamatica_mcp.engine import (
+    Artifact,
     ExecutionResult,
     EngineUnavailableError,
     VariableInfo,
@@ -21,6 +22,7 @@ from baltamatica_mcp.engine import (
 
 DEFAULT_EXECUTABLE = "baltamaticaC.sh"
 ENV_EXECUTABLE = "BALTAMATICA_CLI"
+ARTIFACT_PREFIX = "BALTAMATICA_ARTIFACT="
 VAR_NAME_PATTERN = re.compile(r"^[A-Za-z]\w*$")
 WHOS_ROW_PATTERN = re.compile(
     r"^\s*(?P<name>[A-Za-z]\w*)\s+"
@@ -119,9 +121,15 @@ class CliEngine:
     async def _execute_command(self, code: str) -> ExecutionResult:
         process = await self._run_cli([self._resolve_executable(), "-nodesktop", "-s", code])
         output = _combine_output(process.stdout, process.stderr)
+        artifacts = parse_artifacts(output)
         if process.returncode != 0:
-            return ExecutionResult(success=False, output=output, error=_process_error(process))
-        return ExecutionResult(success=True, output=output)
+            return ExecutionResult(
+                success=False,
+                output=output,
+                error=_process_error(process),
+                artifacts=artifacts,
+            )
+        return ExecutionResult(success=True, output=output, artifacts=artifacts)
 
     def _wrap_stateful_code(self, code: str) -> str:
         state_path = _escape_baltamatica_string(self.state_file.as_posix())
@@ -199,3 +207,50 @@ def parse_whos_output(output: str) -> list[VariableInfo]:
             )
         )
     return variables
+
+
+def parse_artifacts(output: str) -> list[Artifact]:
+    artifacts: list[Artifact] = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(ARTIFACT_PREFIX):
+            continue
+        spec = stripped.removeprefix(ARTIFACT_PREFIX).strip()
+        if not spec:
+            continue
+        artifact_type, artifact_path = _parse_artifact_spec(spec)
+        path = Path(artifact_path).expanduser().resolve()
+        artifacts.append(
+            Artifact(
+                path=str(path),
+                type=artifact_type,
+                exists=path.exists() and path.is_file(),
+                size=path.stat().st_size if path.exists() and path.is_file() else 0,
+            )
+        )
+    return artifacts
+
+
+def _parse_artifact_spec(spec: str) -> tuple[str, str]:
+    if ":" not in spec:
+        return _guess_artifact_type(spec), spec
+
+    maybe_type, maybe_path = spec.split(":", 1)
+    if "/" not in maybe_type:
+        return _guess_artifact_type(spec), spec
+    return maybe_type.strip(), maybe_path.strip()
+
+
+def _guess_artifact_type(path: str) -> str:
+    suffix = Path(path).suffix.lower()
+    if suffix == ".png":
+        return "image/png"
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".svg":
+        return "image/svg+xml"
+    if suffix == ".pdf":
+        return "application/pdf"
+    if suffix == ".csv":
+        return "text/csv"
+    return "application/octet-stream"
