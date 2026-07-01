@@ -220,6 +220,10 @@ def test_arg_parser_accepts_backend_and_transport() -> None:
             "sse",
             "--cli-executable",
             "/opt/baltamatica/bin/baltamaticaC.sh",
+            "--bex-host",
+            "127.0.0.2",
+            "--bex-port",
+            "43141",
             "--timeout",
             "12.5",
             "--state-file",
@@ -230,5 +234,7 @@ def test_arg_parser_accepts_backend_and_transport() -> None:
     assert args.backend == "cli"
     assert args.transport == "sse"
     assert args.cli_executable == "/opt/baltamatica/bin/baltamaticaC.sh"
+    assert args.bex_host == "127.0.0.2"
+    assert args.bex_port == 43141
     assert args.timeout == 12.5
     assert args.state_file == "/tmp/baltamatica-state.mat"
