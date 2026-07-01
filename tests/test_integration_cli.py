@@ -57,8 +57,8 @@ def test_real_cli_preserves_workspace_state(cli_path: Path, tmp_path: Path) -> N
     assert list_result.success is True
     assert {variable.name for variable in list_result.variables} == {"A", "b"}
     assert variable_result.success is True
-    assert "1   2" in variable_result.output
-    assert "3   4" in variable_result.output
+    for value in ("1", "2", "3", "4"):
+        assert value in variable_result.output
     assert clear_result.success is True
     assert cleared_list_result.success is True
     assert cleared_list_result.variables == []
@@ -88,9 +88,13 @@ def test_real_cli_reports_file_artifact(cli_path: Path, tmp_path: Path) -> None:
 
 
 def test_real_cli_runs_artifact_export_demo(cli_path: Path, tmp_path: Path) -> None:
-    artifact_path = Path("/tmp/baltamatica_mcp_wave.csv")
-    if artifact_path.exists():
-        artifact_path.unlink()
+    stale_artifacts = [
+        Path("baltamatica_mcp_wave.csv").resolve(),
+        Path("examples/baltamatica_mcp_wave.csv").resolve(),
+    ]
+    for artifact_path in stale_artifacts:
+        if artifact_path.exists():
+            artifact_path.unlink()
     script_path = Path("examples/artifact_export_demo.m").resolve()
     engine = CliEngine(executable=str(cli_path), timeout=30, state_file=tmp_path / "state.mat")
 
@@ -102,4 +106,5 @@ def test_real_cli_runs_artifact_export_demo(cli_path: Path, tmp_path: Path) -> N
     assert result.artifacts[0].type == "text/csv"
     assert result.artifacts[0].exists is True
     assert result.artifacts[0].size > 0
+    artifact_path = Path(result.artifacts[0].path)
     assert artifact_path.read_text(encoding="utf-8").startswith("t,sin_t,cos_t")

@@ -1,7 +1,7 @@
 % artifact_export_demo.m
 % Demonstrates file artifact reporting for the MCP CLI backend.
 
-output_path = '/tmp/baltamatica_mcp_wave.csv';
+output_path = fullfile(pwd, 'baltamatica_mcp_wave.csv');
 
 t = linspace(0, 2 * pi, 64)';
 signal = [t, sin(t), cos(t)];

@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 
 from baltamatica_mcp.backend_bex import BexEngine
-from baltamatica_mcp.backend_cli import CliEngine, parse_artifacts, parse_whos_output
+from baltamatica_mcp.backend_cli import (
+    CliEngine,
+    detect_baltamatica_error,
+    parse_artifacts,
+    parse_whos_output,
+)
 from baltamatica_mcp.engine import EngineUnavailableError, create_engine
 
 
@@ -79,6 +84,36 @@ def test_execute_code_returns_nonzero_exit_as_failed_result(tmp_path: Path) -> N
     assert result.success is False
     assert result.output == "bad code"
     assert result.error == "Baltamatica CLI exited with code 7: bad code"
+    assert result.artifacts == []
+
+
+def test_execute_code_decodes_utf8_output_on_windows_locale(tmp_path: Path) -> None:
+    executable = write_python_executable(
+        tmp_path / "fake-baltamatica",
+        "import sys\n"
+        "sys.stdout.buffer.write('\u672a\u5b9a\u4e49\u7684\u51fd\u6570'.encode('utf-8'))\n",
+    )
+    engine = CliEngine(executable=str(executable), timeout=10, state_file=tmp_path / "state.mat")
+
+    result = run(engine.execute_code("missing_function()"))
+
+    assert "\u672a\u5b9a\u4e49\u7684\u51fd\u6570" in result.output
+
+
+def test_execute_code_detects_baltamatica_error_text_with_zero_exit(tmp_path: Path) -> None:
+    executable = write_python_executable(
+        tmp_path / "fake-baltamatica",
+        "print('\\x1b[91mplot \u662f\u672a\u5b9a\u4e49\u7684\u53d8\u91cf\u6216\u51fd\u6570\u3002\\x1b[0m')\n",
+    )
+    engine = CliEngine(executable=str(executable), timeout=10, state_file=tmp_path / "state.mat")
+
+    result = run(engine.execute_code("plot(1:3)"))
+
+    assert result.success is False
+    assert "plot \u662f\u672a\u5b9a\u4e49\u7684\u53d8\u91cf\u6216\u51fd\u6570" in result.output
+    assert result.error == (
+        "Baltamatica reported an error: plot \u662f\u672a\u5b9a\u4e49\u7684\u53d8\u91cf\u6216\u51fd\u6570\u3002"
+    )
     assert result.artifacts == []
 
 
@@ -250,3 +285,15 @@ def test_parse_artifacts_supports_explicit_type_and_missing_file(tmp_path: Path)
     assert artifacts[0].type == "text/csv"
     assert artifacts[0].exists is False
     assert artifacts[0].size == 0
+
+
+def test_detect_baltamatica_error_ignores_normal_output() -> None:
+    assert detect_baltamatica_error("  Name  Size  Bytes  Class\n  A  2x2  32 double") is None
+
+
+def test_detect_baltamatica_error_strips_ansi_codes() -> None:
+    error = detect_baltamatica_error(
+        "\x1b[91m\u672a\u5b9a\u4e49\u7684\u51fd\u6570\u3002\n\n\u4f4d\u4e8e\u8f93\u5165\u7684\u7b2c 7 \u5217\u9644\u8fd1\x1b[0m"
+    )
+
+    assert error == "Baltamatica reported an error: \u672a\u5b9a\u4e49\u7684\u51fd\u6570\u3002"
