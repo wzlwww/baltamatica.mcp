@@ -105,6 +105,41 @@ def test_execute_code_sends_json_request_and_parses_result() -> None:
     ]
 
 
+def test_execute_code_sends_utf8_json_without_ascii_escaping() -> None:
+    async def exercise():
+        raw_lines: list[bytes] = []
+
+        async def handle_client(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            line = await reader.readline()
+            raw_lines.append(line)
+            request = json.loads(line.decode("utf-8"))
+            writer.write(
+                json.dumps(response_for(request), separators=(",", ":")).encode("utf-8")
+                + b"\n"
+            )
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        engine = BexEngine(port=port, timeout=1)
+        try:
+            await engine.execute_code("disp('北太天元')")
+        finally:
+            await engine.close()
+            await close_server(server)
+        return raw_lines
+
+    raw_lines = run(exercise())
+
+    assert "北太天元".encode("utf-8") in raw_lines[0]
+    assert b"\\u5317" not in raw_lines[0]
+
+
 def test_run_script_and_clear_workspace_use_expected_methods() -> None:
     async def exercise():
         server, requests, port = await start_mock_bex_server(

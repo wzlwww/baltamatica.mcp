@@ -20,13 +20,13 @@
 - 📂 **管理脚本**：运行本地 `.m` 脚本文件
 - 🧹 **清空工作区**：重置计算环境
 
-**当前状态**：CLI 后端已经可用，支持执行代码、运行脚本、查询变量、读取变量和清空工作区。CLI 模式通过 `.mat` 状态文件在多次 MCP 调用之间保持工作区变量；BEX 后端已经包含 JSON 协议、Python TCP 客户端和实验性 BEX 桥接插件，可在 Baltamatica GUI 进程内执行代码、运行脚本、清空工作区、查询/读取工作区变量，并触发 GUI Figure 弹窗。BEX 变量值当前以文本形式返回，大数组会截断；结构化 JSON/二进制矩阵传输仍在后续 PR 中完成。
+**当前状态**：CLI 后端已经可用，支持执行代码、运行脚本、查询变量、读取变量和清空工作区。CLI 模式通过 `.mat` 状态文件在多次 MCP 调用之间保持工作区变量；BEX JSON 协议、Python TCP 客户端和最小 BEX 桥接源码已经就绪，BEX 变量读取与序列化仍在后续规划中。
 
 ---
 
 ## 🏗️ 系统架构
 
-当前实现优先提供 **CLI fallback 后端**，通过北太天元命令行入口执行代码，并用 `.mat` 状态文件保持工作区变量。BEX 路径提供实验性的 **BEX 插件 + TCP Socket** 后端：插件加载到 Baltamatica GUI 进程后，会在本机回环地址启动 JSON-over-TCP 桥接服务，Python MCP 服务可以后台连接这个桥接服务并把 `plot(...)` 等命令送入 GUI 解释器。
+当前实现优先提供 **CLI fallback 后端**，通过北太天元命令行入口执行代码，并用 `.mat` 状态文件保持工作区变量。BEX 路径已定义 **JSON-over-TCP** 协议，并包含一个最小 **BEX + TCP Socket** 桥接源码，用于验证低延迟长连接后端。
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -41,28 +41,26 @@
 │  get_variable / clear_workspace                          │
 │                                                          │
 │             Engine Dispatcher                            │
-│           ┌────────┴────────┐                            │
-│           ▼                 ▼                            │
-│      CLI Backend       BEX Backend                       │
-│ subprocess + .mat      TCP JSON Client                   │
-│    state file                                             │
-└───────────┬─────────────────┬────────────────────────────┘
-            ▼                 ▼
-  Baltamatica CLI      GUI-loaded BEX bridge
+│                    │                                     │
+│                    ▼                                     │
+│             CLI Backend                                  │
+│      subprocess + .mat state file                        │
+└────────────────────┬─────────────────────────────────────┘
+                     ▼
+        Baltamatica CLI: baltamatica -nodesktop -s "..."
 ```
 
 ### 后端状态
 
-| 特性 | CLI 后端（已实现） | BEX 后端（实验性桥接） |
+| 特性 | CLI 后端（已实现） | BEX 后端（最小桥接） |
 |:---|:---:|:---:|
-| `execute_code` | ✅ | ✅ `eval` via `bxCallBaltamatica` |
+| `execute_code` | ✅ | ✅ `bxEvalString` |
 | `run_script` | ✅ | ✅ `run('...')` |
-| `list_variables` | ✅ `whos` 解析 | ✅ SDK 变量名 + 元数据 |
-| `get_variable` | ✅ `disp()` 文本 | ✅ `bxArrayToCStr` 文本 |
+| `list_variables` | ✅ `whos` 解析 | 规划中 |
+| `get_variable` | ✅ `disp()` 文本 | 规划中 |
 | `clear_workspace` | ✅ | ✅ `clear` |
-| 工作区状态保持 | ✅ `.mat` 状态文件 | ✅ GUI 进程内保持 |
-| GUI 画图弹窗 | ❌ headless CLI 边界 | ✅ GUI 进程加载后可弹 Figure |
-| 图像/文件产物反馈 | ✅ 文件 artifact marker | 协议支持，插件侧待补齐 |
+| 工作区状态保持 | ✅ `.mat` 状态文件 | ✅ BEX 进程长连接 |
+| 图像/文件产物反馈 | ✅ 文件 artifact marker | 协议支持 artifact 列表 |
 
 ---
 
@@ -73,7 +71,7 @@
 - Python 3.10+
 - [北太天元 2025](https://www.baltamatica.com/download.html)（社区版即可）
 - 北太天元命令行入口（macOS 通常是 `/Applications/Baltamatica.app/Contents/MacOS/baltamatica`）
-- BEX 编译器（可选，仅 BEX GUI 桥接模式需要；macOS 通常是 `/Applications/Baltamatica.app/Contents/MacOS/bex`）
+- C 编译器（可选，后续 BEX 插件开发需要）
 
 ### 安装
 
@@ -85,37 +83,15 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-### BEX GUI 桥接模式（实验性）
+### BEX 插件状态
 
-BEX JSON 协议见 [docs/bex-protocol.md](docs/bex-protocol.md)，使用和排障见
-[docs/bex-bridge.md](docs/bex-bridge.md)。当前仓库包含最小 BEX 桥接插件
-`bex/mcp_bridge.c`，加载到 Baltamatica GUI 后会监听 `127.0.0.1:31415`。后续 MCP 调用可以在后台通过 TCP 进入 GUI 进程，因此 `plot(...)` 会弹出 Baltamatica Figure。当前桥接循环运行在 BEX 调用线程内，以保证解释器和 GUI 绘图调用发生在正确线程；代码执行通过 Baltamatica `eval` 完成。因此启动 `mcp_bridge()` 后，GUI 命令窗口会被桥接服务占用，直到桥接进程退出或收到调试用 `shutdown` 请求。
-
-先在仓库根目录编译插件：
-
-```bash
-/Applications/Baltamatica.app/Contents/MacOS/bex bex/mcp_bridge.c
-```
-
-然后在 Baltamatica GUI 中把仓库根目录加入路径，并运行：
-
-```matlab
-addpath('/path/to/baltamatica.mcp'); mcp_bridge()
-```
-
-也可以指定端口：
-
-```matlab
-addpath('/path/to/baltamatica.mcp'); mcp_bridge(31416)
-```
-
-桥接启动后，在另一个终端启动 BEX 后端：
+BEX JSON 协议见 [docs/bex-protocol.md](docs/bex-protocol.md)。Python 端已经包含
+`--backend bex` 客户端骨架，C 端最小桥接源码见 [docs/bex-plugin.md](docs/bex-plugin.md)。
+PR7 BEX 桥接支持 `execute_code`、`run_script` 和 `clear_workspace`，返回结构化成功/错误结果，但暂不捕获控制台输出；变量读取仍在规划中。日常稳定试用仍建议先使用 CLI 后端。
 
 ```bash
 python -m baltamatica_mcp --backend bex --bex-host 127.0.0.1 --bex-port 31415
 ```
-
-限制：当前 BEX 桥接插件已实现 `execute_code`、`run_script`、`clear_workspace`、`list_variables` 和 `get_variable`。变量值先以文本形式返回；大数组输出会截断，结构化 JSON/二进制矩阵传输计划在后续序列化 PR 中完成。
 
 ### 在 Claude Desktop 中配置
 
@@ -209,26 +185,25 @@ baltamatica.mcp/
 │   ├── server.py           # MCP Server & Tool 注册
 │   ├── engine.py           # 后端协议与结果类型
 │   ├── backend_cli.py      # CLI 后端：subprocess + .mat 状态文件
-│   ├── backend_bex.py      # BEX JSON-over-TCP 客户端
+│   ├── backend_bex.py      # BEX JSON-over-TCP 客户端骨架
 │   └── serializer.py       # 后续变量序列化占位
 ├── bex/
-│   ├── mcp_bridge.c        # 实验性 BEX JSON-over-TCP 桥接插件
-│   └── bex_plot_probe.c    # BEX GUI 画图能力探针
+│   ├── CMakeLists.txt      # BEX CMake 构建配置
+│   ├── mcp_protocol.h      # BEX JSON 协议常量
+│   └── mcp_bridge.c        # 最小 BEX TCP 桥接源码
 ├── tests/
 │   ├── test_backend_cli.py
 │   ├── test_backend_bex.py
+│   ├── test_bex_sources.py
 │   ├── test_integration_cli.py
 │   ├── test_server.py
 │   └── fixtures/sample_script.m
 ├── docs/
 │   ├── contributing.md
-│   ├── bex-bridge.md
-│   ├── bex-plot-probe.md
 │   ├── bex-protocol.md
+│   ├── bex-plugin.md
 │   └── pr-plan.md
 └── examples/
-    ├── artifact_export_demo.m
-    ├── bex_plot_probe_demo.m
     ├── monte_carlo_pi.m
     └── numerical_pipeline_demo.m
 ```
@@ -239,11 +214,11 @@ baltamatica.mcp/
 
 | Tool 名称 | 参数 | 描述 | CLI 后端 | BEX 后端 |
 |:---|:---|:---|:---:|:---:|
-| `execute_code` | `code: string` | 执行代码并返回控制台输出 | ✅ | ✅ |
-| `run_script` | `file_path: string` | 运行 `.m` 脚本文件 | ✅ | ✅ |
-| `list_variables` | — | 列出工作区所有变量（名称、类型、维度） | ✅ `whos` 解析 | ✅ |
-| `get_variable` | `name: string` | 获取变量显示值 | ✅ `disp()` 文本 | ✅ |
-| `clear_workspace` | — | 清空工作区状态 | ✅ | ✅ |
+| `execute_code` | `code: string` | 执行代码并返回控制台输出 | ✅ | ✅ 最小桥接 |
+| `run_script` | `file_path: string` | 运行 `.m` 脚本文件 | ✅ | ✅ 最小桥接 |
+| `list_variables` | — | 列出工作区所有变量（名称、类型、维度） | ✅ `whos` 解析 | 规划中 |
+| `get_variable` | `name: string` | 获取变量显示值 | ✅ `disp()` 文本 | 规划中 |
+| `clear_workspace` | — | 清空工作区状态 | ✅ | ✅ 最小桥接 |
 
 ### 文件产物反馈
 
@@ -279,15 +254,11 @@ fprintf('BALTAMATICA_ARTIFACT=/tmp/plot.png\n');
 - [x] 数值计算示例：`examples/numerical_pipeline_demo.m`
 - [x] 文件产物反馈：`BALTAMATICA_ARTIFACT=...`
 - [x] BEX JSON 协议设计与 Python TCP 客户端骨架
-- [x] BEX 插件最小可用版：GUI 进程内执行代码和脚本
-- [x] BEX GUI 画图探针与 `plot(...)` Figure 弹窗验证
-- [x] BEX `list_variables` / `get_variable` 文本变量读取
+- [x] BEX 插件最小可用版
 
 ### 下一步
 
-- [ ] BEX 结构化变量序列化（JSON/二进制矩阵）
-- [ ] BEX 图像/文件产物反馈插件侧补齐
-- [ ] BEX GUI 生命周期和自动化测试体验完善
+- [ ] BEX 变量读取与序列化
 - [ ] 发布与安装体验完善
 
 ---
