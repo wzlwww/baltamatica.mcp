@@ -111,7 +111,7 @@ class BexEngine:
             writer.write(data)
             await asyncio.wait_for(writer.drain(), timeout=self.timeout)
             line = await asyncio.wait_for(reader.readline(), timeout=self.timeout)
-        except TimeoutError as exc:
+        except asyncio.TimeoutError as exc:
             await self.close()
             raise TimeoutError(
                 f"BEX request '{payload['method']}' timed out after {self.timeout:g} seconds."
@@ -148,7 +148,7 @@ class BexEngine:
                 asyncio.open_connection(self.host, self.port),
                 timeout=self.timeout,
             )
-        except TimeoutError as exc:
+        except asyncio.TimeoutError as exc:
             raise EngineUnavailableError(
                 f"Timed out connecting to BEX bridge at {self.host}:{self.port}."
             ) from exc
