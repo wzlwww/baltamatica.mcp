@@ -98,6 +98,12 @@ python -m baltamatica_mcp --backend bex --bex-host 127.0.0.1 --bex-port 31415
 
 停止 GUI 中阻塞运行的 BEX bridge：
 
+```matlab
+mcp_bridge('stop')
+```
+
+如果 GUI 命令行窗口仍被 `mcp_bridge()` 占用，可从终端发送同样的 shutdown 请求：
+
 ```bash
 PYTHONPATH=src python -m baltamatica_mcp.bex_shutdown
 ```

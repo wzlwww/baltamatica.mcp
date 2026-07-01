@@ -37,8 +37,10 @@ typedef SOCKET mcp_socket_t;
 #else
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 typedef int mcp_socket_t;
 #define MCP_INVALID_SOCKET (-1)
@@ -78,33 +80,120 @@ static void mcp_socket_cleanup(void) {
 #endif
 }
 
-static int mcp_parse_port(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[]) {
+static void mcp_set_close_on_exec(mcp_socket_t socket_fd) {
+#ifndef _WIN32
+    int flags = fcntl(socket_fd, F_GETFD, 0);
+    if (flags >= 0) {
+        (void)fcntl(socket_fd, F_SETFD, flags | FD_CLOEXEC);
+    }
+#else
+    (void)socket_fd;
+#endif
+}
+
+static void mcp_set_recv_timeout(mcp_socket_t socket_fd, int milliseconds) {
+#ifdef _WIN32
+    DWORD timeout = (DWORD)milliseconds;
+    setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof(timeout));
+#else
+    struct timeval timeout;
+    timeout.tv_sec = milliseconds / 1000;
+    timeout.tv_usec = (milliseconds % 1000) * 1000;
+    setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+#endif
+}
+
+static int mcp_validate_no_outputs(int nlhs, bxArray *plhs[]) {
     (void)plhs;
     if (nlhs > 0) {
         bxErrMsgTxt("mcp_bridge does not return output arguments.");
         return -1;
     }
+    return 0;
+}
+
+static int mcp_parse_port_arg(const bxArray *arg) {
+    const double *value;
+    int port;
+
+    if (!bxIsDouble(arg) || !bxIsScalar(arg)) {
+        bxErrMsgTxt("mcp_bridge port must be a numeric scalar.");
+        return -1;
+    }
+
+    value = bxGetDoublesRO(arg);
+    port = value ? (int)(*value) : -1;
+    if (port <= 0 || port > 65535) {
+        bxErrMsgTxt("mcp_bridge port must be between 1 and 65535.");
+        return -1;
+    }
+    return port;
+}
+
+static int mcp_parse_port(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[]) {
+    if (mcp_validate_no_outputs(nlhs, plhs) != 0) {
+        return -1;
+    }
     if (nrhs > 1) {
-        bxErrMsgTxt("mcp_bridge accepts at most one optional port argument.");
+        bxErrMsgTxt("mcp_bridge accepts an optional port, or 'stop' with an optional port.");
         return -1;
     }
     if (nrhs == 0) {
         return BALTAMATICA_MCP_DEFAULT_PORT;
     }
-    if (!bxIsDouble(prhs[0]) || !bxIsScalar(prhs[0])) {
-        bxErrMsgTxt("mcp_bridge port must be a numeric scalar.");
-        return -1;
+    return mcp_parse_port_arg(prhs[0]);
+}
+
+static int mcp_array_is_stop_command(const bxArray *value) {
+    char raw[64];
+    char normalized[16];
+    size_t out_index = 0;
+    size_t raw_index;
+
+    raw[0] = '\0';
+    if (bxIsChar(value)) {
+        const char *chars = bxGetCharsRO(value);
+        baSize elements = bxGetNumberOfElements(value);
+        baSize limit = elements < (baSize)(sizeof(raw) - 1) ? elements : (baSize)(sizeof(raw) - 1);
+        if (chars == NULL) {
+            return 0;
+        }
+        for (baSize i = 0; i < limit; ++i) {
+            raw[i] = chars[i];
+        }
+        raw[limit] = '\0';
+    } else if (bxIsString(value)) {
+        const char *text = bxGetString(value, 0);
+        if (text == NULL) {
+            return 0;
+        }
+        snprintf(raw, sizeof(raw), "%s", text);
+    } else {
+        return 0;
     }
 
-    {
-        const double *value = bxGetDoublesRO(prhs[0]);
-        int port = value ? (int)(*value) : -1;
-        if (port <= 0 || port > 65535) {
-            bxErrMsgTxt("mcp_bridge port must be between 1 and 65535.");
-            return -1;
+    for (raw_index = 0; raw[raw_index] != '\0' && out_index + 1 < sizeof(normalized); ++raw_index) {
+        unsigned char ch = (unsigned char)raw[raw_index];
+        if (isalpha(ch)) {
+            normalized[out_index++] = (char)tolower(ch);
         }
-        return port;
     }
+    normalized[out_index] = '\0';
+    return strcmp(normalized, "stop") == 0;
+}
+
+static int mcp_parse_stop_port(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[]) {
+    if (mcp_validate_no_outputs(nlhs, plhs) != 0) {
+        return -1;
+    }
+    if (nrhs > 2) {
+        bxErrMsgTxt("mcp_bridge('stop') accepts at most one optional port argument.");
+        return -1;
+    }
+    if (nrhs == 1) {
+        return BALTAMATICA_MCP_DEFAULT_PORT;
+    }
+    return mcp_parse_port_arg(prhs[1]);
 }
 
 static const char *mcp_skip_ws(const char *cursor) {
@@ -389,6 +478,18 @@ static void mcp_print_bridge_message(const char *phase, const char *preposition,
         "fprintf('MCP bridge %s %s %s:%d\\n');",
         phase,
         preposition,
+        BALTAMATICA_MCP_DEFAULT_HOST,
+        port);
+    (void)bxEvalString(command);
+}
+
+static void mcp_print_bridge_text(const char *message, int port) {
+    char command[256];
+    snprintf(
+        command,
+        sizeof(command),
+        "fprintf('MCP bridge %s %s:%d\\n');",
+        message,
         BALTAMATICA_MCP_DEFAULT_HOST,
         port);
     (void)bxEvalString(command);
@@ -938,6 +1039,7 @@ static int mcp_listen_loop(int port) {
         bxErrMsgTxt("Failed to create BEX bridge socket.");
         return 1;
     }
+    mcp_set_close_on_exec(server_fd);
 
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse, sizeof(reuse));
 
@@ -976,8 +1078,72 @@ static int mcp_listen_loop(int port) {
     return 0;
 }
 
+static int mcp_send_shutdown_request(int port) {
+    const char *request = "{\"id\":\"stop\",\"method\":\"shutdown\",\"params\":{}}\n";
+    struct sockaddr_in address;
+    mcp_socket_t client_fd = MCP_INVALID_SOCKET;
+    char response[256];
+    int sent;
+    int received;
+
+    if (!mcp_socket_startup()) {
+        bxErrMsgTxt("Failed to initialize socket runtime.");
+        return 2;
+    }
+
+    client_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (!mcp_socket_valid(client_fd)) {
+        mcp_socket_cleanup();
+        bxErrMsgTxt("Failed to create BEX bridge shutdown socket.");
+        return 2;
+    }
+    mcp_set_close_on_exec(client_fd);
+    mcp_set_recv_timeout(client_fd, 1000);
+
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons((unsigned short)port);
+
+    if (connect(client_fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
+        mcp_close_socket(client_fd);
+        mcp_socket_cleanup();
+        return 1;
+    }
+
+    sent = send(client_fd, request, (int)strlen(request), 0);
+    if (sent <= 0) {
+        mcp_close_socket(client_fd);
+        mcp_socket_cleanup();
+        return 2;
+    }
+
+    received = recv(client_fd, response, (int)sizeof(response) - 1, 0);
+    mcp_close_socket(client_fd);
+    mcp_socket_cleanup();
+    return received > 0 ? 0 : 2;
+}
+
 void bexFunction(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[]) {
-    int port = mcp_parse_port(nlhs, plhs, nrhs, prhs);
+    int port;
+    if (nrhs > 0 && mcp_array_is_stop_command(prhs[0])) {
+        int status;
+        port = mcp_parse_stop_port(nlhs, plhs, nrhs, prhs);
+        if (port < 0) {
+            return;
+        }
+        status = mcp_send_shutdown_request(port);
+        if (status == 0) {
+            mcp_print_bridge_text("stop requested on", port);
+        } else if (status == 1) {
+            mcp_print_bridge_text("is not listening on", port);
+        } else {
+            mcp_print_bridge_text("stop request failed on", port);
+        }
+        return;
+    }
+
+    port = mcp_parse_port(nlhs, plhs, nrhs, prhs);
     if (port < 0) {
         return;
     }

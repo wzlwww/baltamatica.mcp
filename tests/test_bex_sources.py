@@ -30,6 +30,13 @@ def test_bex_bridge_implements_sdk_entrypoint_and_minimal_methods() -> None:
     assert 'mcp_print_bridge_message("ready", "at", port)' in source
     assert 'mcp_print_bridge_message("listening", "on", port)' in source
     assert "fprintf('MCP bridge %s %s %s:%d\\\\n');" in source
+    assert "mcp_array_is_stop_command" in source
+    assert "bxGetCharsRO(value)" in source
+    assert "bxIsString(value)" in source
+    assert "mcp_send_shutdown_request" in source
+    assert "mcp_set_close_on_exec(server_fd)" in source
+    assert 'const char *request = "{\\"id\\":\\"stop\\",\\"method\\":\\"shutdown\\",\\"params\\":{}}\\n";' in source
+    assert "mcp_bridge('stop') accepts at most one optional port argument." in source
 
 
 def test_bex_protocol_header_matches_python_defaults() -> None:
@@ -57,6 +64,7 @@ def test_bex_plugin_documentation_covers_manual_workflow() -> None:
 
     assert "bex mcp_bridge.c" in docs
     assert "mcp_bridge(43141)" in docs
+    assert "mcp_bridge('stop')" in docs
     assert "--backend bex" in docs
     assert "list_variables" in docs
     assert "structured JSON" in docs

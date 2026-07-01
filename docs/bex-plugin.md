@@ -82,6 +82,17 @@ python -m baltamatica_mcp --backend bex --bex-host 127.0.0.1 --bex-port 31415
 
 ## Stop The Bridge
 
+If the Baltamatica command prompt is available, call the BEX helper directly:
+
+```matlab
+mcp_bridge('stop')
+mcp_bridge('stop', 43141)
+```
+
+The helper connects to the loopback listener and sends the same shutdown
+request used by the Python helper. It is intended for the case where Ctrl+C has
+returned the prompt but the listener was not released.
+
 For development, send a newline-delimited JSON `shutdown` request:
 
 ```json

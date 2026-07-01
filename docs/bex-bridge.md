@@ -37,6 +37,18 @@ PYTHONPATH=src python -m baltamatica_mcp --backend bex --bex-host 127.0.0.1 --be
 
 ## Stop
 
+If the GUI command prompt is available, the BEX function can send a shutdown
+request to an already running bridge:
+
+```matlab
+mcp_bridge('stop')
+mcp_bridge('stop', 31416)
+```
+
+This is useful after Ctrl+C returns the prompt but leaves the bridge listener
+alive. It cannot run from the same command window while `mcp_bridge()` is still
+blocking that prompt.
+
 The bridge accepts a debug lifecycle request:
 
 ```json
@@ -96,6 +108,10 @@ Either stop the existing bridge or start a new one on a different port:
 ```matlab
 mcp_bridge(31416)
 ```
+
+Older bridge builds could leave the port held by a Baltamatica child process
+after the bridge loop stopped. Rebuild the BEX file and restart Baltamatica so
+new listener sockets are marked close-on-exec.
 
 ### `plot` is undefined
 
