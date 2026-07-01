@@ -40,7 +40,6 @@ typedef SOCKET mcp_socket_t;
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <unistd.h>
 typedef int mcp_socket_t;
 #define MCP_INVALID_SOCKET (-1)
@@ -88,18 +87,6 @@ static void mcp_set_close_on_exec(mcp_socket_t socket_fd) {
     }
 #else
     (void)socket_fd;
-#endif
-}
-
-static void mcp_set_recv_timeout(mcp_socket_t socket_fd, int milliseconds) {
-#ifdef _WIN32
-    DWORD timeout = (DWORD)milliseconds;
-    setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof(timeout));
-#else
-    struct timeval timeout;
-    timeout.tv_sec = milliseconds / 1000;
-    timeout.tv_usec = (milliseconds % 1000) * 1000;
-    setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 #endif
 }
 
@@ -1083,9 +1070,7 @@ static int mcp_send_shutdown_request(int port) {
     const char *request = "{\"id\":\"stop\",\"method\":\"shutdown\",\"params\":{}}\n";
     struct sockaddr_in address;
     mcp_socket_t client_fd = MCP_INVALID_SOCKET;
-    char response[256];
     int sent;
-    int received;
 
     if (!mcp_socket_startup()) {
         bxErrMsgTxt("Failed to initialize socket runtime.");
@@ -1099,7 +1084,6 @@ static int mcp_send_shutdown_request(int port) {
         return 2;
     }
     mcp_set_close_on_exec(client_fd);
-    mcp_set_recv_timeout(client_fd, 1000);
 
     memset(&address, 0, sizeof(address));
     address.sin_family = AF_INET;
@@ -1119,10 +1103,9 @@ static int mcp_send_shutdown_request(int port) {
         return 2;
     }
 
-    received = recv(client_fd, response, (int)sizeof(response) - 1, 0);
     mcp_close_socket(client_fd);
     mcp_socket_cleanup();
-    return received > 0 ? 0 : 2;
+    return 0;
 }
 
 void bexFunction(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[]) {

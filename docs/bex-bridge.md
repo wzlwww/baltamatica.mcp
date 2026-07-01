@@ -47,7 +47,9 @@ mcp_bridge('stop', 31416)
 
 This is useful after Ctrl+C returns the prompt but leaves the bridge listener
 alive. It cannot run from the same command window while `mcp_bridge()` is still
-blocking that prompt.
+blocking that prompt. The command sends the shutdown request and returns without
+waiting for a response, because Ctrl+C can leave the listener in a state where a
+TCP connection succeeds but no bridge loop is still accepting requests.
 
 The bridge accepts a debug lifecycle request:
 
@@ -112,6 +114,10 @@ mcp_bridge(31416)
 Older bridge builds could leave the port held by a Baltamatica child process
 after the bridge loop stopped. Rebuild the BEX file and restart Baltamatica so
 new listener sockets are marked close-on-exec.
+
+If Ctrl+C leaves the Baltamatica process itself holding the port and neither
+`mcp_bridge('stop')` nor the Python shutdown helper can release it, restart the
+Baltamatica process or use a different port for the next bridge session.
 
 ### `plot` is undefined
 

@@ -91,7 +91,9 @@ mcp_bridge('stop', 43141)
 
 The helper connects to the loopback listener and sends the same shutdown
 request used by the Python helper. It is intended for the case where Ctrl+C has
-returned the prompt but the listener was not released.
+returned the prompt but the listener was not released. The helper sends the
+request and returns without waiting for a response, so it still gives console
+feedback when Ctrl+C leaves the TCP listener in a half-active state.
 
 For development, send a newline-delimited JSON `shutdown` request:
 
