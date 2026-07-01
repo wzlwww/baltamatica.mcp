@@ -381,6 +381,32 @@ static void mcp_escape_baltamatica_string(const char *input, char *output, size_
     output[index] = '\0';
 }
 
+static void mcp_print_bridge_message(const char *phase, const char *preposition, int port) {
+    char command[256];
+    snprintf(
+        command,
+        sizeof(command),
+        "fprintf('MCP bridge %s %s %s:%d\\n');",
+        phase,
+        preposition,
+        BALTAMATICA_MCP_DEFAULT_HOST,
+        port);
+    (void)bxEvalString(command);
+}
+
+static int mcp_eval_command(const char *command) {
+    bxArray *args[1];
+    int status;
+
+    args[0] = bxCreateString(command);
+    if (args[0] == NULL) {
+        return 1;
+    }
+    status = bxCallBaltamatica(0, NULL, 1, (const bxArray **)args, "eval");
+    bxDestroyArray(args[0]);
+    return status;
+}
+
 static int mcp_is_valid_variable_name(const char *name) {
     size_t index;
     if (name == NULL || name[0] == '\0') {
@@ -788,7 +814,7 @@ static void mcp_handle_request(mcp_socket_t client_fd, const mcp_request_t *requ
     }
 
     if (strcmp(request->method, BALTAMATICA_MCP_METHOD_EXECUTE_CODE) == 0) {
-        int status = bxEvalString(request->code);
+        int status = mcp_eval_command(request->code);
         if (status == 0) {
             mcp_send_success(client_fd, request->id, "");
         } else {
@@ -805,8 +831,8 @@ static void mcp_handle_request(mcp_socket_t client_fd, const mcp_request_t *requ
         char escaped[BALTAMATICA_MCP_MAX_PATH * 2];
         char command[BALTAMATICA_MCP_MAX_PATH * 2 + 16];
         mcp_escape_baltamatica_string(request->file_path, escaped, sizeof(escaped));
-        snprintf(command, sizeof(command), "run('%s')", escaped);
-        if (bxEvalString(command) == 0) {
+        snprintf(command, sizeof(command), "run('%s');", escaped);
+        if (mcp_eval_command(command) == 0) {
             mcp_send_success(client_fd, request->id, "");
         } else {
             mcp_send_error(
@@ -819,7 +845,7 @@ static void mcp_handle_request(mcp_socket_t client_fd, const mcp_request_t *requ
     }
 
     if (strcmp(request->method, BALTAMATICA_MCP_METHOD_CLEAR_WORKSPACE) == 0) {
-        if (bxEvalString("clear") == 0) {
+        if (mcp_eval_command("clear;") == 0) {
             mcp_send_success(client_fd, request->id, "");
         } else {
             mcp_send_error(
@@ -934,6 +960,8 @@ static int mcp_listen_loop(int port) {
         return 1;
     }
 
+    mcp_print_bridge_message("listening", "on", port);
+
     while (!stop_server) {
         mcp_socket_t client_fd = accept(server_fd, NULL, NULL);
         if (!mcp_socket_valid(client_fd)) {
@@ -953,5 +981,6 @@ void bexFunction(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[]) {
     if (port < 0) {
         return;
     }
+    mcp_print_bridge_message("ready", "at", port);
     (void)mcp_listen_loop(port);
 }

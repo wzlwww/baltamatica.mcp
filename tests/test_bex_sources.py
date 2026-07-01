@@ -18,7 +18,8 @@ def test_bex_bridge_implements_sdk_entrypoint_and_minimal_methods() -> None:
     assert '#include "bex/bex.h"' in source
     assert '#include "mcp_protocol.h"' in source
     assert "void bexFunction(" in source
-    assert "bxEvalString(request->code)" in source
+    assert "bxCallBaltamatica(0, NULL, 1, (const bxArray **)args, \"eval\")" in source
+    assert "mcp_eval_command(request->code)" in source
     assert 'strcmp(request->method, BALTAMATICA_MCP_METHOD_EXECUTE_CODE)' in source
     assert 'strcmp(request->method, BALTAMATICA_MCP_METHOD_RUN_SCRIPT)' in source
     assert 'strcmp(request->method, BALTAMATICA_MCP_METHOD_CLEAR_WORKSPACE)' in source
@@ -26,6 +27,9 @@ def test_bex_bridge_implements_sdk_entrypoint_and_minimal_methods() -> None:
     assert 'strcmp(request->method, BALTAMATICA_MCP_METHOD_GET_VARIABLE)' in source
     assert "BALTAMATICA_MCP_METHOD_SHUTDOWN" in source
     assert "mcp_array_to_json_value" in source
+    assert 'mcp_print_bridge_message("ready", "at", port)' in source
+    assert 'mcp_print_bridge_message("listening", "on", port)' in source
+    assert "fprintf('MCP bridge %s %s %s:%d\\\\n');" in source
 
 
 def test_bex_protocol_header_matches_python_defaults() -> None:
