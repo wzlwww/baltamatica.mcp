@@ -85,28 +85,53 @@ pip install -e .
 
 ### BEX 插件状态
 
-BEX JSON 协议见 [docs/bex-protocol.md](docs/bex-protocol.md)。Python 端已经包含
-`--backend bex` 客户端骨架，C 端最小桥接源码见 [docs/bex-plugin.md](docs/bex-plugin.md)。
-当前 BEX 桥接支持 `execute_code`、`run_script`、`clear_workspace`、`list_variables`
-和 `get_variable`，返回结构化成功/错误结果；命令执行暂不捕获控制台输出。日常稳定试用仍建议先使用 CLI 后端。
+BEX JSON 协议见 [docs/bex-protocol.md](docs/bex-protocol.md)，桥接使用与生命周期见
+[docs/bex-plugin.md](docs/bex-plugin.md) 与 [docs/bex-bridge.md](docs/bex-bridge.md)。
+当前 BEX 桥接已实现 `execute_code`、`run_script`、`clear_workspace`、`list_variables`
+和 `get_variable`，返回结构化成功/错误结果。
 
-限制：当前 BEX 桥接插件已实现 `execute_code`、`run_script`、`clear_workspace`、`list_variables` 和 `get_variable`。变量值始终以文本形式返回；小型实数数值/逻辑数组还会附带结构化 JSON。大数组输出会截断，二进制矩阵传输计划在后续序列化 PR 中完成。
+**编译并加载**（在北太天元 GUI 命令行）：
+
+```matlab
+clear mcp_bridge
+cd '/path/to/baltamatica.mcp/bex'
+bex 'mcp_bridge.c'                                   % 生成 mcp_bridge.bexmaci64 / .bexa64 / .bexw64
+addpath('/path/to/baltamatica.mcp/bex'); savepath   % 让 mcp_bridge 常驻搜索路径
+```
+
+**两种运行模式**：
+
+```matlab
+mcp_bridge()              % 前台：阻塞命令行，直到被停止
+mcp_bridge('background')  % 后台：立即返回，命令行空着（推荐，可从同一 GUI 控制）
+```
+
+启动后让 Python MCP server 连接同一端口：
 
 ```bash
 python -m baltamatica_mcp --backend bex --bex-host 127.0.0.1 --bex-port 31415
 ```
 
-停止 GUI 中阻塞运行的 BEX bridge：
+**停止**：
 
 ```matlab
-mcp_bridge('stop')
+mcp_bridge('stop')        % 可靠停止；前台被 Ctrl-C 打断后也能释放端口
 ```
 
-如果 GUI 命令行窗口仍被 `mcp_bridge()` 占用，可从终端发送同样的 shutdown 请求：
+桥接把监听 socket 记在进程全局态里：`stop` 能在前台被 Ctrl-C 打断后直接关闭 socket 释放端口，
+重跑 `mcp_bridge()` 会自动回收泄漏的 socket 而不是 bind 失败。若 `mcp_bridge` 不在搜索路径上
+（例如重启后 `addpath` 丢失），可用纯 TCP 的兜底工具停止，完全不依赖路径：
 
 ```bash
 PYTHONPATH=src python -m baltamatica_mcp.bex_shutdown
 ```
+
+**已知限制**：
+
+- 变量值始终以文本形式返回；小型实数数值/逻辑数组附带结构化 JSON。大数组会截断；二进制矩阵传输、复数/字符/结构体/元胞的结构化序列化仍在后续 PR。
+- `execute_code` 暂不捕获控制台输出（计算结果请用 `get_variable` 取回）。
+- 屏幕绘图可用（`figure`/`plot` 等会在 GUI 弹窗），但**图形导出到文件不可用**——当前北太天元未提供 `saveas`/`print`/`exportgraphics` 等函数；要回传图像需走数据侧（`BALTAMATICA_ARTIFACT` + CSV）或后续的绘图探针。
+- 日常稳定试用仍可优先使用 CLI 后端。
 
 ### 在 Claude Desktop 中配置
 
@@ -272,13 +297,16 @@ fprintf('BALTAMATICA_ARTIFACT=/tmp/plot.png\n');
 - [x] BEX 插件最小可用版
 - [x] BEX `list_variables` / `get_variable` 文本变量读取
 - [x] BEX 小型实数数值/逻辑数组结构化 JSON 读取
+- [x] BEX 生命周期健壮化：可靠 `stop` / Ctrl-C 恢复 / 自愈重绑 / `background` 模式 / 状态返回值
+- [x] BEX `get_variable` 存在性预检查（避免不存在变量在 GUI 里回显 `evalin` 错误）
 
 ### 下一步
 
-- [ ] BEX 大矩阵二进制传输与复杂类型结构化序列化
-- [ ] BEX 图像/文件产物反馈插件侧补齐
-- [ ] BEX GUI 生命周期和自动化测试体验完善
-- [ ] 发布与安装体验完善
+- [ ] BEX 大矩阵二进制传输，复数/字符/结构体/元胞的结构化序列化（目前仅文本 + 小实数/逻辑）
+- [ ] BEX `execute_code` 控制台输出捕获（当前仅返回成功/错误，不含 stdout）
+- [ ] BEX 图形导出到文件：北太天元缺 `saveas`/`print`/`exportgraphics`，需绘图探针（`bex/bex_plot_probe.c`）或原生导出路径
+- [ ] `background` 模式跨线程调用解释器的线程安全评估
+- [ ] 发布与安装体验完善（PR9：安装说明、故障排查、PyPI 元数据、BEX 二进制发布）
 
 ---
 
