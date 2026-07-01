@@ -41,6 +41,7 @@
 #define ARRAY_LINE_WIDTH 120
 
 static int g_stop_requested = 0;
+static int g_bridge_port = BRIDGE_PORT;
 
 static void json_escape(const char *src, char *dst, size_t dst_size)
 {
@@ -441,6 +442,20 @@ static void process_request(const char *request, char *response, size_t response
         return;
     }
 
+    if (strcmp(method, "status") == 0) {
+        char escaped_id[256];
+        json_escape(id, escaped_id, sizeof(escaped_id));
+        snprintf(
+            response,
+            response_size,
+            "{\"id\":\"%s\",\"success\":true,\"output\":\"MCP bridge ready\","
+            "\"host\":\"%s\",\"port\":%d,\"artifacts\":[]}\n",
+            escaped_id,
+            BRIDGE_HOST,
+            g_bridge_port);
+        return;
+    }
+
     if (strcmp(method, "execute_code") == 0) {
         if (!extract_json_string(request, "code", code, sizeof(code))) {
             make_response(id, false, "", "BAD_REQUEST", "Missing params.code.", response, response_size);
@@ -579,7 +594,7 @@ static void handle_client(int client_fd)
     }
 }
 
-static int server_loop(void)
+static int server_loop(int port)
 {
     int server_fd;
     struct sockaddr_in addr;
@@ -595,11 +610,11 @@ static int server_loop(void)
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(BRIDGE_PORT);
+    addr.sin_port = htons((uint16_t)port);
     inet_pton(AF_INET, BRIDGE_HOST, &addr.sin_addr);
 
     if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        bxPrintf("MCP bridge failed to bind %s:%d: %d\n", BRIDGE_HOST, BRIDGE_PORT, errno);
+        bxPrintf("MCP bridge failed to bind %s:%d: %d\n", BRIDGE_HOST, port, errno);
         close(server_fd);
         return errno;
     }
@@ -609,7 +624,7 @@ static int server_loop(void)
         return errno;
     }
 
-    bxPrintf("MCP bridge listening on %s:%d\n", BRIDGE_HOST, BRIDGE_PORT);
+    bxPrintf("MCP bridge listening on %s:%d\n", BRIDGE_HOST, port);
 
     while (!g_stop_requested) {
         int client_fd = accept(server_fd, NULL, NULL);
@@ -630,12 +645,22 @@ static int server_loop(void)
 BEX_EXPORT void bexFunction(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[])
 {
     int status;
-    (void)nrhs;
-    (void)prhs;
+    int port = BRIDGE_PORT;
+
+    if (nrhs > 0) {
+        int err = 0;
+        int requested_port = bxAsInt(prhs[0], &err);
+        if (err == 0 && requested_port > 0 && requested_port <= 65535) {
+            port = requested_port;
+        } else {
+            bxPrintf("Invalid MCP bridge port; using default %d\n", BRIDGE_PORT);
+        }
+    }
 
     g_stop_requested = 0;
-    bxPrintf("MCP bridge ready at %s:%d\n", BRIDGE_HOST, BRIDGE_PORT);
-    status = server_loop();
+    g_bridge_port = port;
+    bxPrintf("MCP bridge ready at %s:%d\n", BRIDGE_HOST, port);
+    status = server_loop(port);
 
     if (nlhs > 0) {
         plhs[0] = bxCreateDoubleScalar((double)status);

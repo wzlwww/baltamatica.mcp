@@ -240,15 +240,36 @@ Out of scope:
 
 ## Planned PRs
 
-### PR9: Packaging and Release Readiness
+### PR9: BEX Bridge Usability and Release Notes
 
-Goal: prepare the project for external users.
+Goal: make the experimental BEX bridge easier to start, diagnose, and document.
 
-Proposed implementation:
+Implemented:
 
-- Add release checklist.
-- Add platform-specific installation notes.
-- Add troubleshooting guide for CLI and BEX.
-- Add PyPI metadata polish.
-- Add example MCP configs for Codex, Claude Desktop, and Claude Code.
-- Prepare GitHub Releases layout for future BEX binaries.
+- Add optional port selection:
+  - `mcp_bridge()` uses `127.0.0.1:31415`
+  - `mcp_bridge(31416)` starts on a custom port
+- Add diagnostic `status` protocol method.
+- Keep `shutdown` documented as the lifecycle release path for tests and GUI use.
+- Add `docs/bex-bridge.md` with:
+  - build instructions
+  - interactive GUI startup instructions
+  - MCP startup command
+  - status and shutdown request examples
+  - plotting notes
+  - troubleshooting for occupied ports, `plot` availability, blocked command
+    window, compiled BEX artifacts, and truncated variable output
+- Update README and protocol docs to link the BEX bridge guide.
+- Extend real BEX TCP integration coverage to start the bridge on a custom
+  port and verify the `status` response.
+
+Verification:
+
+- `/Applications/Baltamatica.app/Contents/MacOS/bex bex/mcp_bridge.c`
+- `BALTAMATICA_CLI=/Applications/Baltamatica.app/Contents/MacOS/baltamatica PYTHONPATH=src pytest -q tests/test_integration_cli.py::test_real_bex_bridge_executes_code_over_tcp`
+
+Out of scope:
+
+- Release packaging for prebuilt BEX binaries.
+- PyPI release metadata polish.
+- Capturing console output from evaluated code.

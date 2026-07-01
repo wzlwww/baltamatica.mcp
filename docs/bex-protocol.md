@@ -15,7 +15,8 @@ adds the first minimal C bridge in `bex/mcp_bridge.c`.
 
 - TCP socket, bound to loopback by default.
 - Default host: `127.0.0.1`.
-- Default port: `31415`.
+- Default port: `31415`. The BEX function can be started on another port with
+  `mcp_bridge(31416)`.
 - Encoding: UTF-8.
 - Framing: newline-delimited JSON. Each request and response is one JSON object
   followed by `\n`.
@@ -152,6 +153,33 @@ Response:
 {"id":"6","success":true,"output":"1 2\n3 4","artifacts":[]}
 ```
 
+### `status`
+
+Return bridge lifecycle information. This is intended for diagnostics and
+integration tests.
+
+Request:
+
+```json
+{"id":"7","method":"status","params":{}}
+```
+
+Response:
+
+```json
+{"id":"7","success":true,"output":"MCP bridge ready","host":"127.0.0.1","port":31415,"artifacts":[]}
+```
+
+### `shutdown`
+
+Ask the bridge server loop to exit and release the GUI command window.
+
+Request:
+
+```json
+{"id":"8","method":"shutdown","params":{}}
+```
+
 ## Artifact Schema
 
 Commands can report generated files with the same normalized shape used by the
@@ -235,6 +263,8 @@ SDK notes that matter for PR7 and later:
 - Implements `clear_workspace` by evaluating `clear;`.
 - Implements `list_variables` with SDK workspace variable names and metadata.
 - Implements `get_variable` with text output from `bxArrayToCStr`.
+- Supports optional startup port selection through `mcp_bridge(port)`.
+- Supports diagnostic `status` and lifecycle `shutdown` protocol methods.
 - Does not capture console output yet; responses currently use an empty
   `output` field.
 - Does not save or return plot images. When loaded inside the Baltamatica GUI,

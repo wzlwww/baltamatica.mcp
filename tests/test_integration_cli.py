@@ -180,9 +180,10 @@ def test_real_bex_bridge_executes_code_over_tcp(cli_path: Path, bex_compiler: Pa
     repo_root = Path(__file__).resolve().parents[1]
     source_path = repo_root / "bex" / "mcp_bridge.c"
     compiled_path = repo_root / "mcp_bridge.bexmaci64"
+    bridge_port = 31416
 
-    if _tcp_port_is_listening("127.0.0.1", 31415):
-        pytest.skip("BEX bridge port 31415 is already in use.")
+    if _tcp_port_is_listening("127.0.0.1", bridge_port):
+        pytest.skip(f"BEX bridge port {bridge_port} is already in use.")
 
     subprocess.run(
         [str(bex_compiler), str(source_path)],
@@ -197,7 +198,7 @@ def test_real_bex_bridge_executes_code_over_tcp(cli_path: Path, bex_compiler: Pa
             str(cli_path),
             "-nodesktop",
             "-s",
-            f"addpath('{repo_root.as_posix()}'); mcp_bridge()",
+            f"addpath('{repo_root.as_posix()}'); mcp_bridge({bridge_port})",
         ],
         cwd=repo_root,
         stdout=subprocess.PIPE,
@@ -205,17 +206,20 @@ def test_real_bex_bridge_executes_code_over_tcp(cli_path: Path, bex_compiler: Pa
         text=True,
     )
     try:
-        _wait_for_tcp_port("127.0.0.1", 31415, proc)
+        _wait_for_tcp_port("127.0.0.1", bridge_port, proc)
+        status_response = _send_bridge_request("127.0.0.1", bridge_port, "status", {})
         (
             assign_result,
             expression_result,
             list_result,
             variable_result,
             failure_result,
-        ) = run(_exercise_bex_bridge())
-        _send_bridge_shutdown("127.0.0.1", 31415)
+        ) = run(_exercise_bex_bridge(bridge_port))
+        _send_bridge_shutdown("127.0.0.1", bridge_port)
 
         stdout, stderr = proc.communicate(timeout=8)
+        assert status_response["success"] is True
+        assert status_response["port"] == bridge_port
         assert assign_result.success is True
         assert expression_result.success is True
         assert list_result.success is True
@@ -229,7 +233,7 @@ def test_real_bex_bridge_executes_code_over_tcp(cli_path: Path, bex_compiler: Pa
         assert "3   4" in variable_result.output
         assert failure_result.success is False
         assert failure_result.error is not None
-        assert "MCP bridge listening on 127.0.0.1:31415" in stdout
+        assert f"MCP bridge listening on 127.0.0.1:{bridge_port}" in stdout
         assert stderr.strip() == ""
     finally:
         if proc.poll() is None:
@@ -278,15 +282,19 @@ def _wait_for_tcp_port(host: str, port: int, proc: subprocess.Popen[str]) -> Non
 
 
 def _send_bridge_shutdown(host: str, port: int) -> None:
-    payload = {"id": "shutdown", "method": "shutdown", "params": {}}
+    _send_bridge_request(host, port, "shutdown", {})
+
+
+def _send_bridge_request(host: str, port: int, method: str, params: dict[str, object]):
+    payload = {"id": method, "method": method, "params": params}
     with socket.create_connection((host, port), timeout=2) as sock:
         sock.settimeout(2)
         sock.sendall(json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n")
-        sock.recv(8192)
+        return json.loads(sock.recv(8192).decode("utf-8"))
 
 
-async def _exercise_bex_bridge():
-    engine = BexEngine(port=31415, timeout=5)
+async def _exercise_bex_bridge(port: int):
+    engine = BexEngine(port=port, timeout=5)
     try:
         assign_result = await engine.execute_code("A=[1 2;3 4]; b=42;")
         expression_result = await engine.execute_code("1+1;")
