@@ -29,6 +29,7 @@ def test_bex_bridge_implements_sdk_entrypoint_and_minimal_methods() -> None:
     assert "mcp_array_to_json_value" in source
     assert 'mcp_print_bridge_message("ready", "at", port)' in source
     assert 'mcp_print_bridge_message("listening", "on", port)' in source
+    assert 'mcp_print_bridge_message("stopped", "on", port)' in source
     assert "fprintf('MCP bridge %s %s %s:%d\\\\n');" in source
     assert "mcp_array_is_stop_command" in source
     assert "bxGetCharsRO(value)" in source

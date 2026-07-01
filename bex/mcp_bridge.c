@@ -1075,6 +1075,7 @@ static int mcp_listen_loop(int port) {
 
     mcp_close_socket(server_fd);
     mcp_socket_cleanup();
+    mcp_print_bridge_message("stopped", "on", port);
     return 0;
 }
 
