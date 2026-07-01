@@ -206,12 +206,27 @@ def test_real_bex_bridge_executes_code_over_tcp(cli_path: Path, bex_compiler: Pa
     )
     try:
         _wait_for_tcp_port("127.0.0.1", 31415, proc)
-        assign_result, expression_result, failure_result = run(_exercise_bex_bridge())
+        (
+            assign_result,
+            expression_result,
+            list_result,
+            variable_result,
+            failure_result,
+        ) = run(_exercise_bex_bridge())
         _send_bridge_shutdown("127.0.0.1", 31415)
 
         stdout, stderr = proc.communicate(timeout=8)
         assert assign_result.success is True
         assert expression_result.success is True
+        assert list_result.success is True
+        variables = {variable.name: variable for variable in list_result.variables}
+        assert {"A", "b"}.issubset(variables)
+        assert variables["A"].size == "2x2"
+        assert variables["A"].class_name == "double"
+        assert variables["A"].bytes == 32
+        assert variable_result.success is True
+        assert "1   2" in variable_result.output
+        assert "3   4" in variable_result.output
         assert failure_result.success is False
         assert failure_result.error is not None
         assert "MCP bridge listening on 127.0.0.1:31415" in stdout
@@ -273,9 +288,11 @@ def _send_bridge_shutdown(host: str, port: int) -> None:
 async def _exercise_bex_bridge():
     engine = BexEngine(port=31415, timeout=5)
     try:
-        assign_result = await engine.execute_code("bex_bridge_smoke=7;")
+        assign_result = await engine.execute_code("A=[1 2;3 4]; b=42;")
         expression_result = await engine.execute_code("1+1;")
+        list_result = await engine.list_variables()
+        variable_result = await engine.get_variable("A")
         failure_result = await engine.execute_code("undefined_bex_bridge_smoke_fn();")
-        return assign_result, expression_result, failure_result
+        return assign_result, expression_result, list_result, variable_result, failure_result
     finally:
         await engine.close()

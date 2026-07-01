@@ -205,23 +205,40 @@ Implemented:
 Out of scope:
 
 - High-performance binary variable transfer.
-- Full workspace serialization.
 - Capturing console output from evaluated code.
 - Saving or returning GUI figure images.
-
-## Planned PRs
 
 ### PR8: BEX Variable Access and Serialization
 
 Goal: make BEX mode feature-complete for variables.
 
-Proposed implementation:
+Implemented:
 
-- Implement `list_variables`.
-- Implement `get_variable` for numeric scalars, vectors, and matrices.
-- Add JSON serialization in `serializer.py`.
-- Add limits for large outputs.
-- Add tests against mock protocol responses and, where available, real BEX.
+- Implement `list_variables` in `bex/mcp_bridge.c`:
+  - `bxGetVariableNames`
+  - `bxEvalIn("base", name, &value)` for metadata lookup
+  - dimensions through `bxGetDimensions`
+  - class names through `bxTypeCStr`
+  - estimated bytes for common numeric and logical arrays
+- Implement `get_variable` with validated variable names and `bxArrayToCStr`.
+- Add fixed output limits with a truncation marker for large rendered values.
+- Extend the real BEX TCP integration test to verify:
+  - variable assignment through `execute_code`
+  - `list_variables` includes `A` and `b`
+  - `A` reports `2x2`, `double`, and 32 estimated bytes
+  - `get_variable("A")` returns matrix text
+
+Verification:
+
+- `BALTAMATICA_CLI=/Applications/Baltamatica.app/Contents/MacOS/baltamatica PYTHONPATH=src pytest -q tests/test_integration_cli.py::test_real_bex_bridge_executes_code_over_tcp`
+
+Out of scope:
+
+- Binary matrix transfer.
+- Full structured JSON values for arrays, structs, cells, tables, and objects.
+- Capturing console output from arbitrary evaluated code.
+
+## Planned PRs
 
 ### PR9: Packaging and Release Readiness
 

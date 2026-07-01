@@ -57,8 +57,8 @@
 |:---|:---:|:---:|
 | `execute_code` | ✅ | ✅ `eval` via `bxCallBaltamatica` |
 | `run_script` | ✅ | ✅ `run('...')` |
-| `list_variables` | ✅ `whos` 解析 | 规划中 |
-| `get_variable` | ✅ `disp()` 文本 | 规划中 |
+| `list_variables` | ✅ `whos` 解析 | ✅ SDK 变量名 + 元数据 |
+| `get_variable` | ✅ `disp()` 文本 | ✅ `bxArrayToCStr` 文本 |
 | `clear_workspace` | ✅ | ✅ `clear` |
 | 工作区状态保持 | ✅ `.mat` 状态文件 | ✅ GUI 进程内保持 |
 | GUI 画图弹窗 | ❌ headless CLI 边界 | ✅ GUI 进程加载后可弹 Figure |
@@ -108,7 +108,7 @@ mcp_bridge()
 python -m baltamatica_mcp --backend bex --bex-host 127.0.0.1 --bex-port 31415
 ```
 
-限制：当前 BEX 桥接插件仅实现 `execute_code`、`run_script` 和 `clear_workspace`；`list_variables` 与 `get_variable` 会返回 `NOT_IMPLEMENTED`，计划在后续 BEX 变量序列化 PR 中完成。
+限制：当前 BEX 桥接插件已实现 `execute_code`、`run_script`、`clear_workspace`、`list_variables` 和 `get_variable`。变量值先以文本形式返回；大数组输出会截断，结构化 JSON/二进制矩阵传输计划在后续序列化 PR 中完成。
 
 ### 在 Claude Desktop 中配置
 
@@ -232,8 +232,8 @@ baltamatica.mcp/
 |:---|:---|:---|:---:|:---:|
 | `execute_code` | `code: string` | 执行代码并返回控制台输出 | ✅ | ✅ |
 | `run_script` | `file_path: string` | 运行 `.m` 脚本文件 | ✅ | ✅ |
-| `list_variables` | — | 列出工作区所有变量（名称、类型、维度） | ✅ `whos` 解析 | 规划中 |
-| `get_variable` | `name: string` | 获取变量显示值 | ✅ `disp()` 文本 | 规划中 |
+| `list_variables` | — | 列出工作区所有变量（名称、类型、维度） | ✅ `whos` 解析 | ✅ |
+| `get_variable` | `name: string` | 获取变量显示值 | ✅ `disp()` 文本 | ✅ |
 | `clear_workspace` | — | 清空工作区状态 | ✅ | ✅ |
 
 ### 文件产物反馈

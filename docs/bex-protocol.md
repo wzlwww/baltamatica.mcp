@@ -109,8 +109,8 @@ Response:
 
 Return metadata for variables currently present in the workspace.
 
-Status: planned for a later BEX variable PR. The PR7 bridge returns
-`NOT_IMPLEMENTED`.
+Status: implemented in the BEX bridge for base-workspace variables. `bytes` is
+estimated for common numeric and logical arrays.
 
 Request:
 
@@ -137,8 +137,8 @@ Return a display representation of one variable. The result stays aligned with
 CLI mode by returning text in `output`; structured JSON values are planned for a
 later BEX serialization PR.
 
-Status: planned for a later BEX variable PR. The PR7 bridge returns
-`NOT_IMPLEMENTED`.
+Status: implemented with `bxEvalIn("base", name, &value)` and
+`bxArrayToCStr(...)`. Variable names are validated before evaluation.
 
 Request:
 
@@ -204,9 +204,10 @@ The protocol is designed around Baltamatica SDK manual API v3.9:
   or `disp(...)`.
 - `run_script`: evaluate a `run(...)` command or equivalent script execution.
 - `clear_workspace`: evaluate `clear` in the target workspace.
-- `list_variables`: `bxGetVariableNames`, followed by metadata lookup, then
-  `bxFreeVariableNames` to release the returned variable-name array.
-- `get_variable`: evaluate or lookup the variable and format the resulting
+- `list_variables`: `bxGetVariableNames`, followed by `bxEvalIn("base", name,
+  &value)` for metadata lookup, then `bxFreeVariableNames` to release the
+  returned variable-name array.
+- `get_variable`: `bxEvalIn("base", name, &value)` and format the resulting
   `bxArray` with `bxArrayToCStr`.
 
 SDK notes that matter for PR7 and later:
@@ -218,12 +219,12 @@ SDK notes that matter for PR7 and later:
   explicitly execute commands in the base workspace where possible.
 - The SDK manual warns callers to validate command strings themselves; the BEX
   plugin should treat protocol input as untrusted.
-- `bxArrayToCStr` can be slow for large arrays. PR8 should add output limits
-  before using it for full variable serialization.
+- `bxArrayToCStr` can be slow for large arrays. The bridge uses a fixed output
+  buffer and appends a truncation marker when the rendered value is too large.
 
 ## Current C Bridge Status
 
-`bex/mcp_bridge.c` is the PR7 minimal implementation:
+`bex/mcp_bridge.c` is the current experimental BEX bridge implementation:
 
 - Listens on `127.0.0.1:31415`.
 - Runs the server loop on the BEX invocation thread so interpreter and plotting
@@ -232,7 +233,8 @@ SDK notes that matter for PR7 and later:
   `bxCallBaltamatica`.
 - Implements `run_script` by evaluating `run('absolute/path.m')`.
 - Implements `clear_workspace` by evaluating `clear;`.
-- Returns `NOT_IMPLEMENTED` for `list_variables` and `get_variable`.
+- Implements `list_variables` with SDK workspace variable names and metadata.
+- Implements `get_variable` with text output from `bxArrayToCStr`.
 - Does not capture console output yet; responses currently use an empty
   `output` field.
 - Does not save or return plot images. When loaded inside the Baltamatica GUI,
