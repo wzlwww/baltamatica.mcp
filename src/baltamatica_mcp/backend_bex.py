@@ -105,7 +105,7 @@ class BexEngine:
 
     async def _send_once(self, payload: dict[str, object]) -> dict[str, Any]:
         reader, writer = await self._ensure_connection()
-        data = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"
+        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
 
         try:
             writer.write(data)

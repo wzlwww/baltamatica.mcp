@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -42,6 +44,12 @@ def cli_path() -> Path:
 
 @pytest.fixture()
 def bex_compiler() -> Path:
+    if os.name == "nt" and shutil.which("cl.exe") is None:
+        pytest.skip(
+            "MSVC cl.exe is required to compile BEX plugins on Windows. "
+            "Run tests from a Visual Studio Developer PowerShell."
+        )
+
     path = Path("/Applications/Baltamatica.app/Contents/MacOS/bex")
     if path.exists():
         return path
@@ -59,7 +67,7 @@ def test_real_cli_executes_code(cli_path: Path, tmp_path: Path) -> None:
 
     assert result.success is True
     assert result.error is None
-    assert result.output.strip() == "2"
+    assert _numbers_in_output(result.output) == ["2"]
 
 
 def test_real_cli_preserves_workspace_state(cli_path: Path, tmp_path: Path) -> None:
@@ -75,8 +83,7 @@ def test_real_cli_preserves_workspace_state(cli_path: Path, tmp_path: Path) -> N
     assert list_result.success is True
     assert {variable.name for variable in list_result.variables} == {"A", "b"}
     assert variable_result.success is True
-    assert "1   2" in variable_result.output
-    assert "3   4" in variable_result.output
+    assert _numbers_in_output(variable_result.output) == ["1", "3", "2", "4"]
     assert clear_result.success is True
     assert cleared_list_result.success is True
     assert cleared_list_result.variables == []
@@ -106,9 +113,6 @@ def test_real_cli_reports_file_artifact(cli_path: Path, tmp_path: Path) -> None:
 
 
 def test_real_cli_runs_artifact_export_demo(cli_path: Path, tmp_path: Path) -> None:
-    artifact_path = Path("/tmp/baltamatica_mcp_wave.csv")
-    if artifact_path.exists():
-        artifact_path.unlink()
     script_path = Path("examples/artifact_export_demo.m").resolve()
     engine = CliEngine(executable=str(cli_path), timeout=30, state_file=tmp_path / "state.mat")
 
@@ -120,14 +124,17 @@ def test_real_cli_runs_artifact_export_demo(cli_path: Path, tmp_path: Path) -> N
     assert result.artifacts[0].type == "text/csv"
     assert result.artifacts[0].exists is True
     assert result.artifacts[0].size > 0
+    artifact_path = Path(result.artifacts[0].path)
     assert artifact_path.read_text(encoding="utf-8").startswith("t,sin_t,cos_t")
 
 
 def test_real_cli_runs_bex_plot_probe(cli_path: Path, bex_compiler: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     source_path = repo_root / "bex" / "bex_plot_probe.c"
-    status_path = Path("/tmp/baltamatica_mcp_bex_plot_probe.txt")
-    compiled_path = repo_root / "bex_plot_probe.bexmaci64"
+    status_path = Path(os.environ.get("TMPDIR", os.environ.get("TEMP", "/tmp"))) / (
+        "baltamatica_mcp_bex_plot_probe.txt"
+    )
+    compiled_path = _compiled_bex_path(repo_root, "bex_plot_probe")
     if status_path.exists():
         status_path.unlink()
 
@@ -160,7 +167,7 @@ def test_real_cli_runs_bex_plot_probe(cli_path: Path, bex_compiler: Path) -> Non
 def test_real_bex_bridge_compiles(bex_compiler: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     source_path = repo_root / "bex" / "mcp_bridge.c"
-    compiled_path = repo_root / "mcp_bridge.bexmaci64"
+    compiled_path = _compiled_bex_path(repo_root, "mcp_bridge")
 
     subprocess.run(
         [str(bex_compiler), str(source_path)],
@@ -179,7 +186,7 @@ def test_real_bex_bridge_compiles(bex_compiler: Path) -> None:
 def test_real_bex_bridge_executes_code_over_tcp(cli_path: Path, bex_compiler: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     source_path = repo_root / "bex" / "mcp_bridge.c"
-    compiled_path = repo_root / "mcp_bridge.bexmaci64"
+    compiled_path = _compiled_bex_path(repo_root, "mcp_bridge")
     bridge_port = 31416
 
     if _tcp_port_is_listening("127.0.0.1", bridge_port):
@@ -229,8 +236,7 @@ def test_real_bex_bridge_executes_code_over_tcp(cli_path: Path, bex_compiler: Pa
         assert variables["A"].class_name == "double"
         assert variables["A"].bytes == 32
         assert variable_result.success is True
-        assert "1   2" in variable_result.output
-        assert "3   4" in variable_result.output
+        assert _numbers_in_output(variable_result.output) == ["1", "3", "2", "4"]
         assert failure_result.success is False
         assert failure_result.error is not None
         assert f"MCP bridge listening on 127.0.0.1:{bridge_port}" in stdout
@@ -255,6 +261,26 @@ def _read_probe_status(path: Path) -> dict[str, str]:
         key, value = line.split("=", 1)
         values[key] = value
     return values
+
+
+def _numbers_in_output(output: str) -> list[str]:
+    numbers: list[str] = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("列 ") or stripped.lower().startswith("column "):
+            continue
+        numbers.extend(re.findall(r"(?<![\w.])-?\d+(?:\.\d+)?(?![\w.])", line))
+    return numbers
+
+
+def _compiled_bex_path(repo_root: Path, stem: str) -> Path:
+    if sys.platform == "win32":
+        suffix = ".bexw64"
+    elif sys.platform == "darwin":
+        suffix = ".bexmaci64"
+    else:
+        suffix = ".bex"
+    return repo_root / f"{stem}{suffix}"
 
 
 def _tcp_port_is_listening(host: str, port: int) -> bool:

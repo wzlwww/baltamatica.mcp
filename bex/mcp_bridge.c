@@ -1,212 +1,423 @@
 /*
- * mcp_bridge.c - Minimal BEX JSON-over-TCP bridge for Baltamatica.
+ * mcp_bridge.c - Minimal BEX bridge for baltamatica.mcp.
  *
- * Build from the repository root:
- *   /Applications/Baltamatica.app/Contents/MacOS/bex bex/mcp_bridge.c
+ * Build from Baltamatica:
+ *   bex "mcp_bridge.c"
  *
- * Load from the Baltamatica GUI command window:
- *   mcp_bridge()
+ * Start from Baltamatica:
+ *   mcp_bridge              % listens on 127.0.0.1:31415
+ *   mcp_bridge(43141)       % listens on 127.0.0.1:43141
  *
- * The bridge listens on 127.0.0.1:31415 and accepts newline-delimited JSON
- * requests matching docs/bex-protocol.md. PR7 intentionally keeps the C side
- * small: execute_code, run_script, clear_workspace, list_variables, and
- * get_variable are implemented with Baltamatica SDK APIs. get_variable also
- * includes a structured JSON value for small real numeric/logical arrays.
- * Binary matrix transfer remains a later PR.
- *
- * The server loop intentionally runs on the BEX invocation thread. Calling
- * Baltamatica interpreter APIs from a background pthread is not reliable across
- * runtimes, while the invocation thread can evaluate commands and open GUI
- * figures.
+ * The bridge is intentionally blocking. Run it in a dedicated Baltamatica
+ * session, then point the MCP server at the same host and port. Variable
+ * reads include text output plus structured JSON for small real numeric and
+ * logical arrays.
  */
 
 #include "bex/bex.h"
+#include "mcp_protocol.h"
 
-#include <arpa/inet.h>
-#include <errno.h>
+#include <ctype.h>
 #include <math.h>
-#include <netinet/in.h>
+#include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdarg.h>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "Ws2_32.lib")
+typedef SOCKET mcp_socket_t;
+#define MCP_INVALID_SOCKET INVALID_SOCKET
+#define mcp_close_socket closesocket
+#else
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+typedef int mcp_socket_t;
+#define MCP_INVALID_SOCKET (-1)
+#define mcp_close_socket close
+#endif
 
-#define BRIDGE_HOST "127.0.0.1"
-#define BRIDGE_PORT 31415
-#define MAX_REQUEST_SIZE 65536
-#define MAX_FIELD_SIZE 32768
-#define MAX_RESPONSE_SIZE 65536
-#define MAX_COMMAND_SIZE 65536
-#define MAX_VARIABLES 512
-#define ARRAY_LINE_WIDTH 120
-#define MAX_VALUE_ELEMENTS 512
+#define MCP_ARRAY_LINE_WIDTH 120
+#define MCP_MAX_OUTPUT 32768
+#define MCP_MAX_VALUE_JSON 32768
+#define MCP_MAX_VARIABLES 512
+#define MCP_MAX_VALUE_ELEMENTS 512
 
-static int g_stop_requested = 0;
-static int g_bridge_port = BRIDGE_PORT;
+typedef struct mcp_request_t {
+    char id[BALTAMATICA_MCP_MAX_ID];
+    char method[BALTAMATICA_MCP_MAX_METHOD];
+    char code[BALTAMATICA_MCP_MAX_CODE];
+    char file_path[BALTAMATICA_MCP_MAX_PATH];
+    char name[BALTAMATICA_MCP_MAX_METHOD];
+} mcp_request_t;
 
-static void json_escape(const char *src, char *dst, size_t dst_size)
-{
-    size_t j = 0;
-    if (dst_size == 0) {
-        return;
-    }
-
-    for (size_t i = 0; src[i] != '\0' && j + 2 < dst_size; ++i) {
-        unsigned char c = (unsigned char)src[i];
-        if (c == '"' || c == '\\') {
-            if (j + 2 >= dst_size) {
-                break;
-            }
-            dst[j++] = '\\';
-            dst[j++] = (char)c;
-        } else if (c == '\n') {
-            if (j + 2 >= dst_size) {
-                break;
-            }
-            dst[j++] = '\\';
-            dst[j++] = 'n';
-        } else if (c == '\r') {
-            if (j + 2 >= dst_size) {
-                break;
-            }
-            dst[j++] = '\\';
-            dst[j++] = 'r';
-        } else if (c == '\t') {
-            if (j + 2 >= dst_size) {
-                break;
-            }
-            dst[j++] = '\\';
-            dst[j++] = 't';
-        } else {
-            dst[j++] = (char)c;
-        }
-    }
-    dst[j] = '\0';
+static int mcp_socket_valid(mcp_socket_t socket_fd) {
+    return socket_fd != MCP_INVALID_SOCKET;
 }
 
-static int extract_json_string(const char *json, const char *key, char *out, size_t out_size)
-{
-    char pattern[128];
-    const char *pos;
-    const char *cursor;
-    size_t j = 0;
+static int mcp_socket_startup(void) {
+#ifdef _WIN32
+    WSADATA data;
+    return WSAStartup(MAKEWORD(2, 2), &data) == 0;
+#else
+    return 1;
+#endif
+}
 
-    if (out_size == 0) {
-        return 0;
-    }
-    out[0] = '\0';
+static void mcp_socket_cleanup(void) {
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
 
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    pos = strstr(json, pattern);
-    if (pos == NULL) {
-        return 0;
+static int mcp_parse_port(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[]) {
+    (void)plhs;
+    if (nlhs > 0) {
+        bxErrMsgTxt("mcp_bridge does not return output arguments.");
+        return -1;
     }
-    pos += strlen(pattern);
-    pos = strchr(pos, ':');
-    if (pos == NULL) {
-        return 0;
+    if (nrhs > 1) {
+        bxErrMsgTxt("mcp_bridge accepts at most one optional port argument.");
+        return -1;
     }
-    pos++;
-    while (*pos == ' ' || *pos == '\t') {
-        pos++;
+    if (nrhs == 0) {
+        return BALTAMATICA_MCP_DEFAULT_PORT;
     }
-    if (*pos != '"') {
-        return 0;
+    if (!bxIsDouble(prhs[0]) || !bxIsScalar(prhs[0])) {
+        bxErrMsgTxt("mcp_bridge port must be a numeric scalar.");
+        return -1;
     }
-    cursor = pos + 1;
 
-    while (*cursor != '\0' && j + 1 < out_size) {
-        char c = *cursor++;
-        if (c == '"') {
-            out[j] = '\0';
-            return 1;
+    {
+        const double *value = bxGetDoublesRO(prhs[0]);
+        int port = value ? (int)(*value) : -1;
+        if (port <= 0 || port > 65535) {
+            bxErrMsgTxt("mcp_bridge port must be between 1 and 65535.");
+            return -1;
         }
-        if (c == '\\') {
-            char esc = *cursor++;
-            if (esc == '\0') {
-                break;
-            }
-            if (esc == 'n') {
-                c = '\n';
-            } else if (esc == 'r') {
-                c = '\r';
-            } else if (esc == 't') {
-                c = '\t';
-            } else {
-                c = esc;
-            }
-        }
-        out[j++] = c;
+        return port;
     }
+}
 
-    out[j] = '\0';
+static const char *mcp_skip_ws(const char *cursor) {
+    while (*cursor && isspace((unsigned char)*cursor)) {
+        ++cursor;
+    }
+    return cursor;
+}
+
+static int mcp_hex_value(char value) {
+    if (value >= '0' && value <= '9') {
+        return value - '0';
+    }
+    if (value >= 'a' && value <= 'f') {
+        return value - 'a' + 10;
+    }
+    if (value >= 'A' && value <= 'F') {
+        return value - 'A' + 10;
+    }
+    return -1;
+}
+
+static int mcp_append_utf8(unsigned int codepoint, char *out, size_t out_size, size_t *index) {
+    if (codepoint <= 0x7F) {
+        if (*index + 1 >= out_size) {
+            return 0;
+        }
+        out[(*index)++] = (char)codepoint;
+        return 1;
+    }
+    if (codepoint <= 0x7FF) {
+        if (*index + 2 >= out_size) {
+            return 0;
+        }
+        out[(*index)++] = (char)(0xC0 | (codepoint >> 6));
+        out[(*index)++] = (char)(0x80 | (codepoint & 0x3F));
+        return 1;
+    }
+    if (codepoint <= 0xFFFF) {
+        if (*index + 3 >= out_size) {
+            return 0;
+        }
+        out[(*index)++] = (char)(0xE0 | (codepoint >> 12));
+        out[(*index)++] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        out[(*index)++] = (char)(0x80 | (codepoint & 0x3F));
+        return 1;
+    }
+    if (codepoint <= 0x10FFFF) {
+        if (*index + 4 >= out_size) {
+            return 0;
+        }
+        out[(*index)++] = (char)(0xF0 | (codepoint >> 18));
+        out[(*index)++] = (char)(0x80 | ((codepoint >> 12) & 0x3F));
+        out[(*index)++] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        out[(*index)++] = (char)(0x80 | (codepoint & 0x3F));
+        return 1;
+    }
     return 0;
 }
 
-static void escape_baltamatica_single_quotes(const char *src, char *dst, size_t dst_size)
-{
-    size_t j = 0;
-    if (dst_size == 0) {
-        return;
+static int mcp_read_json_string(const char *cursor, char *out, size_t out_size) {
+    size_t index = 0;
+    if (*cursor != '"') {
+        return 0;
     }
+    ++cursor;
+    while (*cursor && *cursor != '"') {
+        unsigned char ch = (unsigned char)*cursor++;
+        if (ch == '\\') {
+            char escaped = *cursor++;
+            switch (escaped) {
+            case '"':
+            case '\\':
+            case '/':
+                ch = (unsigned char)escaped;
+                break;
+            case 'b':
+                ch = '\b';
+                break;
+            case 'f':
+                ch = '\f';
+                break;
+            case 'n':
+                ch = '\n';
+                break;
+            case 'r':
+                ch = '\r';
+                break;
+            case 't':
+                ch = '\t';
+                break;
+            case 'u': {
+                unsigned int codepoint = 0;
+                int i;
+                for (i = 0; i < 4; ++i) {
+                    int value = mcp_hex_value(cursor[i]);
+                    if (value < 0) {
+                        return 0;
+                    }
+                    codepoint = (codepoint << 4) | (unsigned int)value;
+                }
+                cursor += 4;
+                if (!mcp_append_utf8(codepoint, out, out_size, &index)) {
+                    return 0;
+                }
+                continue;
+            }
+            default:
+                return 0;
+            }
+        }
+        if (index + 1 >= out_size) {
+            return 0;
+        }
+        out[index++] = (char)ch;
+    }
+    if (*cursor != '"') {
+        return 0;
+    }
+    out[index] = '\0';
+    return 1;
+}
 
-    for (size_t i = 0; src[i] != '\0' && j + 1 < dst_size; ++i) {
-        if (src[i] == '\'' && j + 2 < dst_size) {
-            dst[j++] = '\'';
-            dst[j++] = '\'';
+static int mcp_json_get_string(const char *json, const char *key, char *out, size_t out_size) {
+    char pattern[128];
+    const char *cursor;
+    if (snprintf(pattern, sizeof(pattern), "\"%s\"", key) >= (int)sizeof(pattern)) {
+        return 0;
+    }
+    cursor = strstr(json, pattern);
+    if (!cursor) {
+        return 0;
+    }
+    cursor += strlen(pattern);
+    cursor = mcp_skip_ws(cursor);
+    if (*cursor != ':') {
+        return 0;
+    }
+    cursor = mcp_skip_ws(cursor + 1);
+    return mcp_read_json_string(cursor, out, out_size);
+}
+
+static int mcp_parse_request(const char *line, mcp_request_t *request, char *error, size_t error_size) {
+    memset(request, 0, sizeof(*request));
+    if (!mcp_json_get_string(line, "id", request->id, sizeof(request->id))) {
+        snprintf(error, error_size, "Missing or invalid request id.");
+        return 0;
+    }
+    if (!mcp_json_get_string(line, "method", request->method, sizeof(request->method))) {
+        snprintf(error, error_size, "Missing or invalid method.");
+        return 0;
+    }
+    if (strcmp(request->method, BALTAMATICA_MCP_METHOD_EXECUTE_CODE) == 0) {
+        if (!mcp_json_get_string(line, "code", request->code, sizeof(request->code))) {
+            snprintf(error, error_size, "execute_code requires params.code.");
+            return 0;
+        }
+    } else if (strcmp(request->method, BALTAMATICA_MCP_METHOD_RUN_SCRIPT) == 0) {
+        if (!mcp_json_get_string(line, "file_path", request->file_path, sizeof(request->file_path))) {
+            snprintf(error, error_size, "run_script requires params.file_path.");
+            return 0;
+        }
+    } else if (strcmp(request->method, BALTAMATICA_MCP_METHOD_GET_VARIABLE) == 0) {
+        if (!mcp_json_get_string(line, "name", request->name, sizeof(request->name))) {
+            snprintf(error, error_size, "get_variable requires params.name.");
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void mcp_send_text(mcp_socket_t client_fd, const char *text) {
+    send(client_fd, text, (int)strlen(text), 0);
+}
+
+static void mcp_json_write_escaped(mcp_socket_t client_fd, const char *value) {
+    const unsigned char *cursor = (const unsigned char *)value;
+    while (*cursor) {
+        char buffer[8];
+        unsigned char ch = *cursor++;
+        switch (ch) {
+        case '"':
+            mcp_send_text(client_fd, "\\\"");
+            break;
+        case '\\':
+            mcp_send_text(client_fd, "\\\\");
+            break;
+        case '\n':
+            mcp_send_text(client_fd, "\\n");
+            break;
+        case '\r':
+            mcp_send_text(client_fd, "\\r");
+            break;
+        case '\t':
+            mcp_send_text(client_fd, "\\t");
+            break;
+        default:
+            if (ch < 0x20) {
+                snprintf(buffer, sizeof(buffer), "\\u%04x", ch);
+                mcp_send_text(client_fd, buffer);
+            } else {
+                send(client_fd, (const char *)&ch, 1, 0);
+            }
+            break;
+        }
+    }
+}
+
+static void mcp_send_success(mcp_socket_t client_fd, const char *id, const char *output) {
+    mcp_send_text(client_fd, "{\"id\":\"");
+    mcp_json_write_escaped(client_fd, id);
+    mcp_send_text(client_fd, "\",\"success\":true,\"output\":\"");
+    mcp_json_write_escaped(client_fd, output ? output : "");
+    mcp_send_text(client_fd, "\",\"artifacts\":[]}\n");
+}
+
+static void mcp_send_status(mcp_socket_t client_fd, const char *id, int port) {
+    char port_text[32];
+    snprintf(port_text, sizeof(port_text), "%d", port);
+    mcp_send_text(client_fd, "{\"id\":\"");
+    mcp_json_write_escaped(client_fd, id);
+    mcp_send_text(client_fd, "\",\"success\":true,\"output\":\"MCP bridge ready\",\"host\":\"");
+    mcp_json_write_escaped(client_fd, BALTAMATICA_MCP_DEFAULT_HOST);
+    mcp_send_text(client_fd, "\",\"port\":");
+    mcp_send_text(client_fd, port_text);
+    mcp_send_text(client_fd, ",\"artifacts\":[]}\n");
+}
+
+static void mcp_send_error(
+    mcp_socket_t client_fd,
+    const char *id,
+    const char *code,
+    const char *message) {
+    mcp_send_text(client_fd, "{\"id\":\"");
+    mcp_json_write_escaped(client_fd, id ? id : "");
+    mcp_send_text(client_fd, "\",\"success\":false,\"output\":\"\",\"error\":{\"code\":\"");
+    mcp_json_write_escaped(client_fd, code);
+    mcp_send_text(client_fd, "\",\"message\":\"");
+    mcp_json_write_escaped(client_fd, message);
+    mcp_send_text(client_fd, "\"},\"artifacts\":[]}\n");
+}
+
+static int mcp_recv_line(mcp_socket_t client_fd, char *line, size_t line_size) {
+    size_t index = 0;
+    while (index + 1 < line_size) {
+        char ch;
+        int received = recv(client_fd, &ch, 1, 0);
+        if (received <= 0) {
+            return 0;
+        }
+        if (ch == '\n') {
+            line[index] = '\0';
+            return 1;
+        }
+        if (ch != '\r') {
+            line[index++] = ch;
+        }
+    }
+    line[line_size - 1] = '\0';
+    return -1;
+}
+
+static void mcp_escape_baltamatica_string(const char *input, char *output, size_t output_size) {
+    size_t index = 0;
+    while (*input && index + 1 < output_size) {
+        if (*input == '\'' && index + 2 < output_size) {
+            output[index++] = '\'';
+            output[index++] = '\'';
+            ++input;
         } else {
-            dst[j++] = src[i];
+            output[index++] = *input++;
         }
     }
-    dst[j] = '\0';
+    output[index] = '\0';
 }
 
-static bool is_valid_variable_name(const char *name)
-{
+static int mcp_is_valid_variable_name(const char *name) {
+    size_t index;
     if (name == NULL || name[0] == '\0') {
-        return false;
+        return 0;
     }
-    if (!((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z'))) {
-        return false;
+    if (!isalpha((unsigned char)name[0])) {
+        return 0;
     }
-    for (size_t i = 1; name[i] != '\0'; ++i) {
-        char c = name[i];
-        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-              c == '_')) {
-            return false;
+    for (index = 1; name[index] != '\0'; ++index) {
+        unsigned char ch = (unsigned char)name[index];
+        if (!isalnum(ch) && ch != '_') {
+            return 0;
         }
     }
-    return true;
+    return 1;
 }
 
-static int lookup_variable(const char *name, bxArray **value)
-{
-    if (!is_valid_variable_name(name)) {
+static int mcp_lookup_variable(const char *name, bxArray **value) {
+    if (!mcp_is_valid_variable_name(name)) {
         return 1;
     }
     *value = NULL;
     return bxEvalIn("base", name, value);
 }
 
-static void format_size(const bxArray *value, char *buffer, size_t buffer_size)
-{
+static void mcp_format_size(const bxArray *value, char *buffer, size_t buffer_size) {
     baSize ndim = bxGetNumberOfDimensions(value);
     const baSize *dims = bxGetDimensions(value);
     size_t used = 0;
-
     if (buffer_size == 0) {
         return;
     }
     buffer[0] = '\0';
-
     if (ndim <= 0 || dims == NULL) {
         snprintf(buffer, buffer_size, "%lldx%lld", (long long)bxGetM(value), (long long)bxGetN(value));
         return;
     }
-
     for (baSize i = 0; i < ndim; ++i) {
         int written = snprintf(
             buffer + used,
@@ -225,11 +436,9 @@ static void format_size(const bxArray *value, char *buffer, size_t buffer_size)
     }
 }
 
-static long long estimate_bytes(const bxArray *value)
-{
+static long long mcp_estimate_bytes(const bxArray *value) {
     long long elements = (long long)bxGetNumberOfElements(value);
     long long item_size = 0;
-
     switch (bxGetClassID(value)) {
     case bxINT8_CLASS:
     case bxUINT8_CLASS:
@@ -254,65 +463,13 @@ static long long estimate_bytes(const bxArray *value)
         item_size = 0;
         break;
     }
-
     if (bxIsComplex(value)) {
         item_size *= 2;
     }
     return elements > 0 && item_size > 0 ? elements * item_size : 0;
 }
 
-static void array_to_output(const bxArray *value, char *buffer, size_t buffer_size)
-{
-    baSize required;
-
-    if (buffer_size == 0) {
-        return;
-    }
-    buffer[0] = '\0';
-
-    required = bxArrayToCStr(value, ARRAY_LINE_WIDTH, 0, NULL, 0) + 1;
-    if (required <= 1) {
-        return;
-    }
-
-    bxArrayToCStr(value, ARRAY_LINE_WIDTH, 1, buffer, (baSize)buffer_size);
-    buffer[buffer_size - 1] = '\0';
-
-    if ((size_t)required > buffer_size) {
-        const char *suffix = "\n... output truncated ...";
-        size_t suffix_len = strlen(suffix);
-        if (buffer_size > suffix_len + 1) {
-            memcpy(buffer + buffer_size - suffix_len - 1, suffix, suffix_len + 1);
-        }
-    }
-}
-
-static void append_json(char *buffer, size_t buffer_size, size_t *used, const char *fmt, ...)
-{
-    va_list args;
-    int written;
-
-    if (*used >= buffer_size) {
-        return;
-    }
-
-    va_start(args, fmt);
-    written = vsnprintf(buffer + *used, buffer_size - *used, fmt, args);
-    va_end(args);
-
-    if (written < 0) {
-        return;
-    }
-    if (*used + (size_t)written >= buffer_size) {
-        *used = buffer_size - 1;
-        buffer[*used] = '\0';
-        return;
-    }
-    *used += (size_t)written;
-}
-
-static const char *class_name_from_id(bxClassID class_id)
-{
+static const char *mcp_class_name_from_id(bxClassID class_id) {
     switch (class_id) {
     case bxDOUBLE_CLASS:
         return "double";
@@ -344,138 +501,16 @@ static const char *class_name_from_id(bxClassID class_id)
         return "struct";
     case bxCELL_CLASS:
         return "cell";
-    case bxTABLE_CLASS:
-        return "table";
-    case bxTIMETABLE_CLASS:
-        return "timetable";
-    case bxDATETIME_CLASS:
-        return "datetime";
-    case bxDURATION_CLASS:
-        return "duration";
-    case bxCALENDAR_DURATION_CLASS:
-        return "calendar_duration";
-    case bxCATEGORICAL_CLASS:
-        return "categorical";
     default:
         return "unknown";
     }
 }
 
-static bool append_value_number(const bxArray *value, baSize index, char *buffer, size_t buffer_size, size_t *used)
-{
-    bxClassID class_id = bxGetClassID(value);
-
-    switch (class_id) {
-    case bxDOUBLE_CLASS: {
-        const double *data = bxGetDoublesRO(value);
-        if (data == NULL) {
-            return false;
-        }
-        if (isfinite(data[index])) {
-            append_json(buffer, buffer_size, used, "%.17g", data[index]);
-        } else {
-            append_json(buffer, buffer_size, used, "null");
-        }
-        return true;
-    }
-    case bxSINGLE_CLASS: {
-        const float *data = bxGetSinglesRO(value);
-        if (data == NULL) {
-            return false;
-        }
-        if (isfinite((double)data[index])) {
-            append_json(buffer, buffer_size, used, "%.9g", (double)data[index]);
-        } else {
-            append_json(buffer, buffer_size, used, "null");
-        }
-        return true;
-    }
-    case bxINT8_CLASS: {
-        const int8_t *data = bxGetInt8sRO(value);
-        if (data == NULL) {
-            return false;
-        }
-        append_json(buffer, buffer_size, used, "%d", (int)data[index]);
-        return true;
-    }
-    case bxINT16_CLASS: {
-        const int16_t *data = bxGetInt16sRO(value);
-        if (data == NULL) {
-            return false;
-        }
-        append_json(buffer, buffer_size, used, "%d", (int)data[index]);
-        return true;
-    }
-    case bxINT32_CLASS: {
-        const int32_t *data = bxGetInt32sRO(value);
-        if (data == NULL) {
-            return false;
-        }
-        append_json(buffer, buffer_size, used, "%d", data[index]);
-        return true;
-    }
-    case bxINT64_CLASS: {
-        const int64_t *data = bxGetInt64sRO(value);
-        if (data == NULL) {
-            return false;
-        }
-        append_json(buffer, buffer_size, used, "%lld", (long long)data[index]);
-        return true;
-    }
-    case bxUINT8_CLASS: {
-        const uint8_t *data = bxGetUInt8sRO(value);
-        if (data == NULL) {
-            return false;
-        }
-        append_json(buffer, buffer_size, used, "%u", (unsigned int)data[index]);
-        return true;
-    }
-    case bxUINT16_CLASS: {
-        const uint16_t *data = bxGetUInt16sRO(value);
-        if (data == NULL) {
-            return false;
-        }
-        append_json(buffer, buffer_size, used, "%u", (unsigned int)data[index]);
-        return true;
-    }
-    case bxUINT32_CLASS: {
-        const uint32_t *data = bxGetUInt32sRO(value);
-        if (data == NULL) {
-            return false;
-        }
-        append_json(buffer, buffer_size, used, "%u", data[index]);
-        return true;
-    }
-    case bxUINT64_CLASS: {
-        const uint64_t *data = bxGetUInt64sRO(value);
-        if (data == NULL) {
-            return false;
-        }
-        append_json(buffer, buffer_size, used, "%llu", (unsigned long long)data[index]);
-        return true;
-    }
-    case bxLOGICAL_CLASS: {
-        const bool *data = bxGetLogicalsRO(value);
-        if (data == NULL) {
-            return false;
-        }
-        append_json(buffer, buffer_size, used, "%s", data[index] ? "true" : "false");
-        return true;
-    }
-    default:
-        return false;
-    }
-}
-
-static bool is_structured_value_supported(const bxArray *value)
-{
-    bxClassID class_id = bxGetClassID(value);
-
+static int mcp_structured_value_supported(const bxArray *value) {
     if (bxIsComplex(value)) {
-        return false;
+        return 0;
     }
-
-    switch (class_id) {
+    switch (bxGetClassID(value)) {
     case bxDOUBLE_CLASS:
     case bxSINGLE_CLASS:
     case bxINT8_CLASS:
@@ -487,468 +522,436 @@ static bool is_structured_value_supported(const bxArray *value)
     case bxUINT32_CLASS:
     case bxUINT64_CLASS:
     case bxLOGICAL_CLASS:
-        return true;
+        return 1;
     default:
-        return false;
+        return 0;
     }
 }
 
-static void array_to_json_value(const bxArray *value, char *buffer, size_t buffer_size)
-{
+static void mcp_append_json(char *buffer, size_t buffer_size, size_t *used, const char *fmt, ...) {
+    va_list args;
+    int written;
+    if (*used >= buffer_size) {
+        return;
+    }
+    va_start(args, fmt);
+    written = vsnprintf(buffer + *used, buffer_size - *used, fmt, args);
+    va_end(args);
+    if (written < 0) {
+        return;
+    }
+    if (*used + (size_t)written >= buffer_size) {
+        *used = buffer_size - 1;
+        buffer[*used] = '\0';
+        return;
+    }
+    *used += (size_t)written;
+}
+
+static int mcp_append_value_number(const bxArray *value, baSize index, char *buffer, size_t buffer_size, size_t *used) {
+    switch (bxGetClassID(value)) {
+    case bxDOUBLE_CLASS: {
+        const double *data = bxGetDoublesRO(value);
+        if (data == NULL) {
+            return 0;
+        }
+        mcp_append_json(buffer, buffer_size, used, isfinite(data[index]) ? "%.17g" : "null", data[index]);
+        return 1;
+    }
+    case bxSINGLE_CLASS: {
+        const float *data = bxGetSinglesRO(value);
+        if (data == NULL) {
+            return 0;
+        }
+        mcp_append_json(buffer, buffer_size, used, isfinite((double)data[index]) ? "%.9g" : "null", (double)data[index]);
+        return 1;
+    }
+    case bxINT8_CLASS: {
+        const int8_t *data = bxGetInt8sRO(value);
+        if (data == NULL) {
+            return 0;
+        }
+        mcp_append_json(buffer, buffer_size, used, "%d", (int)data[index]);
+        return 1;
+    }
+    case bxINT16_CLASS: {
+        const int16_t *data = bxGetInt16sRO(value);
+        if (data == NULL) {
+            return 0;
+        }
+        mcp_append_json(buffer, buffer_size, used, "%d", (int)data[index]);
+        return 1;
+    }
+    case bxINT32_CLASS: {
+        const int32_t *data = bxGetInt32sRO(value);
+        if (data == NULL) {
+            return 0;
+        }
+        mcp_append_json(buffer, buffer_size, used, "%d", data[index]);
+        return 1;
+    }
+    case bxINT64_CLASS: {
+        const int64_t *data = bxGetInt64sRO(value);
+        if (data == NULL) {
+            return 0;
+        }
+        mcp_append_json(buffer, buffer_size, used, "%lld", (long long)data[index]);
+        return 1;
+    }
+    case bxUINT8_CLASS: {
+        const uint8_t *data = bxGetUInt8sRO(value);
+        if (data == NULL) {
+            return 0;
+        }
+        mcp_append_json(buffer, buffer_size, used, "%u", (unsigned int)data[index]);
+        return 1;
+    }
+    case bxUINT16_CLASS: {
+        const uint16_t *data = bxGetUInt16sRO(value);
+        if (data == NULL) {
+            return 0;
+        }
+        mcp_append_json(buffer, buffer_size, used, "%u", (unsigned int)data[index]);
+        return 1;
+    }
+    case bxUINT32_CLASS: {
+        const uint32_t *data = bxGetUInt32sRO(value);
+        if (data == NULL) {
+            return 0;
+        }
+        mcp_append_json(buffer, buffer_size, used, "%u", data[index]);
+        return 1;
+    }
+    case bxUINT64_CLASS: {
+        const uint64_t *data = bxGetUInt64sRO(value);
+        if (data == NULL) {
+            return 0;
+        }
+        mcp_append_json(buffer, buffer_size, used, "%llu", (unsigned long long)data[index]);
+        return 1;
+    }
+    case bxLOGICAL_CLASS: {
+        const bool *data = bxGetLogicalsRO(value);
+        if (data == NULL) {
+            return 0;
+        }
+        mcp_append_json(buffer, buffer_size, used, "%s", data[index] ? "true" : "false");
+        return 1;
+    }
+    default:
+        return 0;
+    }
+}
+
+static void mcp_array_to_output(const bxArray *value, char *buffer, size_t buffer_size) {
+    baSize required;
+    if (buffer_size == 0) {
+        return;
+    }
+    buffer[0] = '\0';
+    required = bxArrayToCStr(value, MCP_ARRAY_LINE_WIDTH, 0, NULL, 0) + 1;
+    if (required <= 1) {
+        return;
+    }
+    bxArrayToCStr(value, MCP_ARRAY_LINE_WIDTH, 1, buffer, (baSize)buffer_size);
+    buffer[buffer_size - 1] = '\0';
+    if ((size_t)required > buffer_size) {
+        const char *suffix = "\n... output truncated ...";
+        size_t suffix_len = strlen(suffix);
+        if (buffer_size > suffix_len + 1) {
+            memcpy(buffer + buffer_size - suffix_len - 1, suffix, suffix_len + 1);
+        }
+    }
+}
+
+static void mcp_array_to_json_value(const bxArray *value, char *buffer, size_t buffer_size) {
     bxClassID class_id = bxGetClassID(value);
     baSize ndim = bxGetNumberOfDimensions(value);
     const baSize *dims = bxGetDimensions(value);
     baSize elements = bxGetNumberOfElements(value);
-    baSize emitted = elements < MAX_VALUE_ELEMENTS ? elements : MAX_VALUE_ELEMENTS;
+    baSize emitted = elements < MCP_MAX_VALUE_ELEMENTS ? elements : MCP_MAX_VALUE_ELEMENTS;
     char size_text[128];
-    char escaped_class[256];
     size_t used = 0;
 
     if (buffer_size == 0) {
         return;
     }
     buffer[0] = '\0';
+    mcp_format_size(value, size_text, sizeof(size_text));
+    mcp_append_json(buffer, buffer_size, &used, "{\"supported\":");
 
-    format_size(value, size_text, sizeof(size_text));
-    json_escape(class_name_from_id(class_id), escaped_class, sizeof(escaped_class));
-
-    append_json(buffer, buffer_size, &used, "{\"supported\":");
-
-    if (!is_structured_value_supported(value)) {
-        append_json(
+    if (!mcp_structured_value_supported(value)) {
+        mcp_append_json(
             buffer,
             buffer_size,
             &used,
             "false,\"type\":\"unsupported\",\"class_name\":\"%s\",\"size\":\"%s\","
             "\"element_count\":%lld,\"reason\":\"Only real numeric and logical arrays are supported.\"}",
-            escaped_class,
+            mcp_class_name_from_id(class_id),
             size_text,
             (long long)elements);
         return;
     }
 
-    append_json(
+    mcp_append_json(
         buffer,
         buffer_size,
         &used,
         "true,\"type\":\"%s\",\"class_name\":\"%s\",\"size\":\"%s\",\"dims\":[",
         class_id == bxLOGICAL_CLASS ? "logical_array" : "numeric_array",
-        escaped_class,
+        mcp_class_name_from_id(class_id),
         size_text);
-
     if (ndim <= 0 || dims == NULL) {
-        append_json(buffer, buffer_size, &used, "%lld,%lld", (long long)bxGetM(value), (long long)bxGetN(value));
+        mcp_append_json(buffer, buffer_size, &used, "%lld,%lld", (long long)bxGetM(value), (long long)bxGetN(value));
     } else {
         for (baSize i = 0; i < ndim; ++i) {
-            append_json(buffer, buffer_size, &used, "%s%lld", i == 0 ? "" : ",", (long long)dims[i]);
+            mcp_append_json(buffer, buffer_size, &used, "%s%lld", i == 0 ? "" : ",", (long long)dims[i]);
         }
     }
-
-    append_json(
+    mcp_append_json(
         buffer,
         buffer_size,
         &used,
-        "],\"encoding\":\"column-major\",\"element_count\":%lld,\"truncated\":%s,"
-        "\"data\":[",
+        "],\"encoding\":\"column-major\",\"element_count\":%lld,\"truncated\":%s,\"data\":[",
         (long long)elements,
-        elements > MAX_VALUE_ELEMENTS ? "true" : "false");
-
+        elements > MCP_MAX_VALUE_ELEMENTS ? "true" : "false");
     for (baSize i = 0; i < emitted; ++i) {
         if (i > 0) {
-            append_json(buffer, buffer_size, &used, ",");
+            mcp_append_json(buffer, buffer_size, &used, ",");
         }
-        if (!append_value_number(value, i, buffer, buffer_size, &used)) {
-            append_json(buffer, buffer_size, &used, "null");
+        if (!mcp_append_value_number(value, i, buffer, buffer_size, &used)) {
+            mcp_append_json(buffer, buffer_size, &used, "null");
         }
     }
-
-    append_json(buffer, buffer_size, &used, "]}");
+    mcp_append_json(buffer, buffer_size, &used, "]}");
 }
 
-static void make_response(
-    const char *id,
-    bool success,
-    const char *output,
-    const char *error_code,
-    const char *error_message,
-    char *response,
-    size_t response_size)
-{
-    char escaped_id[256];
-    char escaped_output[MAX_FIELD_SIZE];
-    char escaped_code[256];
-    char escaped_message[MAX_FIELD_SIZE];
-
-    json_escape(id, escaped_id, sizeof(escaped_id));
-    json_escape(output ? output : "", escaped_output, sizeof(escaped_output));
-
-    if (success) {
-        snprintf(
-            response,
-            response_size,
-            "{\"id\":\"%s\",\"success\":true,\"output\":\"%s\",\"artifacts\":[]}\n",
-            escaped_id,
-            escaped_output);
-        return;
-    }
-
-    json_escape(error_code ? error_code : "INTERNAL_ERROR", escaped_code, sizeof(escaped_code));
-    json_escape(error_message ? error_message : "", escaped_message, sizeof(escaped_message));
-    snprintf(
-        response,
-        response_size,
-        "{\"id\":\"%s\",\"success\":false,\"output\":\"%s\","
-        "\"error\":{\"code\":\"%s\",\"message\":\"%s\"},\"artifacts\":[]}\n",
-        escaped_id,
-        escaped_output,
-        escaped_code,
-        escaped_message);
+static void mcp_send_variable_value(mcp_socket_t client_fd, const char *id, const char *output, const char *value_json) {
+    mcp_send_text(client_fd, "{\"id\":\"");
+    mcp_json_write_escaped(client_fd, id);
+    mcp_send_text(client_fd, "\",\"success\":true,\"output\":\"");
+    mcp_json_write_escaped(client_fd, output ? output : "");
+    mcp_send_text(client_fd, "\",\"value\":");
+    mcp_send_text(client_fd, value_json && value_json[0] ? value_json : "null");
+    mcp_send_text(client_fd, ",\"artifacts\":[]}\n");
 }
 
-static void make_variable_list_response(
-    const char *id,
-    const char **names,
-    int name_count,
-    char *response,
-    size_t response_size)
-{
-    char escaped_id[256];
-    size_t used;
-    bool first_item = true;
+static void mcp_send_variable_list(mcp_socket_t client_fd, const char *id) {
+    const char **names = NULL;
+    int name_count = 0;
+    int emitted = 0;
+    char number[64];
 
-    json_escape(id, escaped_id, sizeof(escaped_id));
-    used = (size_t)snprintf(
-        response,
-        response_size,
-        "{\"id\":\"%s\",\"success\":true,\"output\":\"\",\"variables\":[",
-        escaped_id);
+    bxGetVariableNames(&names, &name_count);
+    mcp_send_text(client_fd, "{\"id\":\"");
+    mcp_json_write_escaped(client_fd, id);
+    mcp_send_text(client_fd, "\",\"success\":true,\"output\":\"\",\"variables\":[");
 
-    for (int i = 0; i < name_count && i < MAX_VARIABLES && used + 1 < response_size; ++i) {
+    for (int i = 0; names != NULL && i < name_count && emitted < MCP_MAX_VARIABLES; ++i) {
         bxArray *value = NULL;
         char size_text[128];
-        char escaped_name[256];
-        char escaped_size[256];
-        char escaped_class[256];
-        const char *class_name = "";
-        int status = lookup_variable(names[i], &value);
+        const char *class_name;
 
-        if (status != 0 || value == NULL) {
+        if (mcp_lookup_variable(names[i], &value) != 0 || value == NULL) {
             continue;
         }
-
-        format_size(value, size_text, sizeof(size_text));
+        mcp_format_size(value, size_text, sizeof(size_text));
         class_name = bxTypeCStr(value);
-        json_escape(names[i], escaped_name, sizeof(escaped_name));
-        json_escape(size_text, escaped_size, sizeof(escaped_size));
-        json_escape(class_name ? class_name : "", escaped_class, sizeof(escaped_class));
 
-        int written = snprintf(
-            response + used,
-            used < response_size ? response_size - used : 0,
-            "%s{\"name\":\"%s\",\"size\":\"%s\",\"bytes\":%lld,\"class_name\":\"%s\",\"attributes\":\"\"}",
-            first_item ? "" : ",",
-            escaped_name,
-            escaped_size,
-            estimate_bytes(value),
-            escaped_class);
+        if (emitted > 0) {
+            mcp_send_text(client_fd, ",");
+        }
+        mcp_send_text(client_fd, "{\"name\":\"");
+        mcp_json_write_escaped(client_fd, names[i]);
+        mcp_send_text(client_fd, "\",\"size\":\"");
+        mcp_json_write_escaped(client_fd, size_text);
+        mcp_send_text(client_fd, "\",\"bytes\":");
+        snprintf(number, sizeof(number), "%lld", mcp_estimate_bytes(value));
+        mcp_send_text(client_fd, number);
+        mcp_send_text(client_fd, ",\"class_name\":\"");
+        mcp_json_write_escaped(client_fd, class_name ? class_name : "");
+        mcp_send_text(client_fd, "\",\"attributes\":\"\"}");
         bxDestroyArray(value);
-        if (written < 0) {
-            break;
-        }
-        first_item = false;
-        if (used + (size_t)written >= response_size) {
-            used = response_size - 1;
-            break;
-        }
-        used += (size_t)written;
+        ++emitted;
     }
 
-    snprintf(response + used, used < response_size ? response_size - used : 0, "]}\n");
+    if (names != NULL) {
+        bxFreeVariableNames(names);
+    }
+    mcp_send_text(client_fd, "]}\n");
 }
 
-static void make_variable_value_response(
-    const char *id,
-    const char *output,
-    const char *value_json,
-    char *response,
-    size_t response_size)
-{
-    char escaped_id[256];
-    char escaped_output[MAX_FIELD_SIZE];
+static void mcp_handle_request(mcp_socket_t client_fd, const mcp_request_t *request, int *stop_server, int port) {
+    if (strcmp(request->method, BALTAMATICA_MCP_METHOD_STATUS) == 0) {
+        mcp_send_status(client_fd, request->id, port);
+        return;
+    }
 
-    json_escape(id, escaped_id, sizeof(escaped_id));
-    json_escape(output, escaped_output, sizeof(escaped_output));
-    snprintf(
-        response,
-        response_size,
-        "{\"id\":\"%s\",\"success\":true,\"output\":\"%s\",\"value\":%s,\"artifacts\":[]}\n",
-        escaped_id,
-        escaped_output,
-        value_json ? value_json : "null");
+    if (strcmp(request->method, BALTAMATICA_MCP_METHOD_EXECUTE_CODE) == 0) {
+        int status = bxEvalString(request->code);
+        if (status == 0) {
+            mcp_send_success(client_fd, request->id, "");
+        } else {
+            mcp_send_error(
+                client_fd,
+                request->id,
+                BALTAMATICA_MCP_ERROR_EVAL,
+                "Baltamatica rejected execute_code.");
+        }
+        return;
+    }
+
+    if (strcmp(request->method, BALTAMATICA_MCP_METHOD_RUN_SCRIPT) == 0) {
+        char escaped[BALTAMATICA_MCP_MAX_PATH * 2];
+        char command[BALTAMATICA_MCP_MAX_PATH * 2 + 16];
+        mcp_escape_baltamatica_string(request->file_path, escaped, sizeof(escaped));
+        snprintf(command, sizeof(command), "run('%s')", escaped);
+        if (bxEvalString(command) == 0) {
+            mcp_send_success(client_fd, request->id, "");
+        } else {
+            mcp_send_error(
+                client_fd,
+                request->id,
+                BALTAMATICA_MCP_ERROR_SCRIPT,
+                "Baltamatica rejected run_script.");
+        }
+        return;
+    }
+
+    if (strcmp(request->method, BALTAMATICA_MCP_METHOD_CLEAR_WORKSPACE) == 0) {
+        if (bxEvalString("clear") == 0) {
+            mcp_send_success(client_fd, request->id, "");
+        } else {
+            mcp_send_error(
+                client_fd,
+                request->id,
+                BALTAMATICA_MCP_ERROR_EVAL,
+                "Baltamatica rejected clear_workspace.");
+        }
+        return;
+    }
+
+    if (strcmp(request->method, BALTAMATICA_MCP_METHOD_LIST_VARIABLES) == 0) {
+        mcp_send_variable_list(client_fd, request->id);
+        return;
+    }
+
+    if (strcmp(request->method, BALTAMATICA_MCP_METHOD_GET_VARIABLE) == 0) {
+        bxArray *value = NULL;
+        char output[MCP_MAX_OUTPUT];
+        char value_json[MCP_MAX_VALUE_JSON];
+
+        if (!mcp_is_valid_variable_name(request->name)) {
+            mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_BAD_REQUEST, "Invalid variable name.");
+            return;
+        }
+        if (mcp_lookup_variable(request->name, &value) != 0 || value == NULL) {
+            mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_VARIABLE, "Variable lookup failed.");
+            return;
+        }
+        mcp_array_to_output(value, output, sizeof(output));
+        mcp_array_to_json_value(value, value_json, sizeof(value_json));
+        bxDestroyArray(value);
+        mcp_send_variable_value(client_fd, request->id, output, value_json);
+        return;
+    }
+
+    if (strcmp(request->method, BALTAMATICA_MCP_METHOD_SHUTDOWN) == 0) {
+        *stop_server = 1;
+        mcp_send_success(client_fd, request->id, "shutting down");
+        return;
+    }
+
+    mcp_send_error(
+        client_fd,
+        request->id,
+        BALTAMATICA_MCP_ERROR_BAD_REQUEST,
+        "Unsupported BEX bridge method.");
 }
 
-static int eval_command(const char *command)
-{
-    bxArray *args[1];
-    int status;
+static void mcp_handle_client(mcp_socket_t client_fd, int *stop_server, int port) {
+    char line[BALTAMATICA_MCP_MAX_LINE];
+    while (!*stop_server) {
+        int status = mcp_recv_line(client_fd, line, sizeof(line));
+        if (status == 0) {
+            return;
+        }
+        if (status < 0) {
+            mcp_send_error(client_fd, "", BALTAMATICA_MCP_ERROR_BAD_REQUEST, "Request line too long.");
+            return;
+        }
 
-    args[0] = bxCreateString(command);
-    if (args[0] == NULL) {
+        {
+            mcp_request_t request;
+            char error[BALTAMATICA_MCP_MAX_ERROR];
+            if (!mcp_parse_request(line, &request, error, sizeof(error))) {
+                char id[BALTAMATICA_MCP_MAX_ID] = "";
+                mcp_json_get_string(line, "id", id, sizeof(id));
+                mcp_send_error(client_fd, id, BALTAMATICA_MCP_ERROR_BAD_REQUEST, error);
+                continue;
+            }
+            mcp_handle_request(client_fd, &request, stop_server, port);
+        }
+    }
+}
+
+static int mcp_listen_loop(int port) {
+    struct sockaddr_in address;
+    mcp_socket_t server_fd = MCP_INVALID_SOCKET;
+    int stop_server = 0;
+    int reuse = 1;
+
+    if (!mcp_socket_startup()) {
+        bxErrMsgTxt("Failed to initialize socket runtime.");
         return 1;
     }
-    status = bxCallBaltamatica(0, NULL, 1, (const bxArray **)args, "eval");
-    bxDestroyArray(args[0]);
-    return status;
-}
-
-static void process_request(const char *request, char *response, size_t response_size)
-{
-    char id[256];
-    char method[128];
-    char code[MAX_FIELD_SIZE];
-    char file_path[MAX_FIELD_SIZE];
-    char name[MAX_FIELD_SIZE];
-    char escaped_path[MAX_FIELD_SIZE];
-    char command[MAX_COMMAND_SIZE];
-    int status;
-
-    if (!extract_json_string(request, "id", id, sizeof(id))) {
-        strcpy(id, "");
-    }
-    if (!extract_json_string(request, "method", method, sizeof(method))) {
-        make_response(id, false, "", "BAD_REQUEST", "Missing method.", response, response_size);
-        return;
-    }
-
-    if (strcmp(method, "shutdown") == 0) {
-        g_stop_requested = 1;
-        make_response(id, true, "MCP bridge shutting down.", NULL, NULL, response, response_size);
-        return;
-    }
-
-    if (strcmp(method, "status") == 0) {
-        char escaped_id[256];
-        json_escape(id, escaped_id, sizeof(escaped_id));
-        snprintf(
-            response,
-            response_size,
-            "{\"id\":\"%s\",\"success\":true,\"output\":\"MCP bridge ready\","
-            "\"host\":\"%s\",\"port\":%d,\"artifacts\":[]}\n",
-            escaped_id,
-            BRIDGE_HOST,
-            g_bridge_port);
-        return;
-    }
-
-    if (strcmp(method, "execute_code") == 0) {
-        if (!extract_json_string(request, "code", code, sizeof(code))) {
-            make_response(id, false, "", "BAD_REQUEST", "Missing params.code.", response, response_size);
-            return;
-        }
-        status = eval_command(code);
-        make_response(
-            id,
-            status == 0,
-            "",
-            "EVAL_ERROR",
-            status == 0 ? "" : "Baltamatica failed to execute code.",
-            response,
-            response_size);
-        return;
-    }
-
-    if (strcmp(method, "run_script") == 0) {
-        if (!extract_json_string(request, "file_path", file_path, sizeof(file_path))) {
-            make_response(
-                id,
-                false,
-                "",
-                "BAD_REQUEST",
-                "Missing params.file_path.",
-                response,
-                response_size);
-            return;
-        }
-        escape_baltamatica_single_quotes(file_path, escaped_path, sizeof(escaped_path));
-        snprintf(command, sizeof(command), "run('%s');", escaped_path);
-        status = eval_command(command);
-        make_response(
-            id,
-            status == 0,
-            "",
-            "SCRIPT_ERROR",
-            status == 0 ? "" : "Baltamatica failed to run script.",
-            response,
-            response_size);
-        return;
-    }
-
-    if (strcmp(method, "clear_workspace") == 0) {
-        status = eval_command("clear;");
-        make_response(
-            id,
-            status == 0,
-            "",
-            "EVAL_ERROR",
-            status == 0 ? "" : "Baltamatica failed to clear workspace.",
-            response,
-            response_size);
-        return;
-    }
-
-    if (strcmp(method, "list_variables") == 0) {
-        const char **names = NULL;
-        int name_count = 0;
-
-        bxGetVariableNames(&names, &name_count);
-        make_variable_list_response(id, names, name_count, response, response_size);
-        if (names != NULL) {
-            bxFreeVariableNames(names);
-        }
-        return;
-    }
-
-    if (strcmp(method, "get_variable") == 0) {
-        bxArray *value = NULL;
-        char output[MAX_FIELD_SIZE];
-        char value_json[MAX_FIELD_SIZE];
-
-        if (!extract_json_string(request, "name", name, sizeof(name))) {
-            make_response(id, false, "", "BAD_REQUEST", "Missing params.name.", response, response_size);
-            return;
-        }
-        if (!is_valid_variable_name(name)) {
-            make_response(id, false, "", "BAD_REQUEST", "Invalid variable name.", response, response_size);
-            return;
-        }
-
-        status = lookup_variable(name, &value);
-        if (status != 0 || value == NULL) {
-            make_response(id, false, "", "VARIABLE_ERROR", "Variable lookup failed.", response, response_size);
-            return;
-        }
-
-        array_to_output(value, output, sizeof(output));
-        array_to_json_value(value, value_json, sizeof(value_json));
-        bxDestroyArray(value);
-        make_variable_value_response(id, output, value_json, response, response_size);
-        return;
-    }
-
-    make_response(id, false, "", "BAD_REQUEST", "Unsupported method.", response, response_size);
-}
-
-static ssize_t read_line(int fd, char *buffer, size_t size)
-{
-    size_t used = 0;
-    while (used + 1 < size) {
-        char c;
-        ssize_t n = recv(fd, &c, 1, 0);
-        if (n == 0) {
-            break;
-        }
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return -1;
-        }
-        buffer[used++] = c;
-        if (c == '\n') {
-            break;
-        }
-    }
-    buffer[used] = '\0';
-    return (ssize_t)used;
-}
-
-static void handle_client(int client_fd)
-{
-    char request[MAX_REQUEST_SIZE];
-    char response[MAX_RESPONSE_SIZE];
-
-    while (!g_stop_requested) {
-        ssize_t n = read_line(client_fd, request, sizeof(request));
-        if (n <= 0) {
-            break;
-        }
-        process_request(request, response, sizeof(response));
-        send(client_fd, response, strlen(response), 0);
-        if (g_stop_requested) {
-            break;
-        }
-    }
-}
-
-static int server_loop(int port)
-{
-    int server_fd;
-    struct sockaddr_in addr;
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) {
-        bxPrintf("MCP bridge failed to create socket: %d\n", errno);
-        return errno;
+    if (!mcp_socket_valid(server_fd)) {
+        mcp_socket_cleanup();
+        bxErrMsgTxt("Failed to create BEX bridge socket.");
+        return 1;
     }
 
-    int opt = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse, sizeof(reuse));
 
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)port);
-    inet_pton(AF_INET, BRIDGE_HOST, &addr.sin_addr);
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons((unsigned short)port);
 
-    if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        bxPrintf("MCP bridge failed to bind %s:%d: %d\n", BRIDGE_HOST, port, errno);
-        close(server_fd);
-        return errno;
-    }
-    if (listen(server_fd, 8) != 0) {
-        bxPrintf("MCP bridge failed to listen: %d\n", errno);
-        close(server_fd);
-        return errno;
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
+        mcp_close_socket(server_fd);
+        mcp_socket_cleanup();
+        bxErrMsgTxt("Failed to bind BEX bridge socket.");
+        return 1;
     }
 
-    bxPrintf("MCP bridge listening on %s:%d\n", BRIDGE_HOST, port);
+    if (listen(server_fd, BALTAMATICA_MCP_BACKLOG) != 0) {
+        mcp_close_socket(server_fd);
+        mcp_socket_cleanup();
+        bxErrMsgTxt("Failed to listen on BEX bridge socket.");
+        return 1;
+    }
 
-    while (!g_stop_requested) {
-        int client_fd = accept(server_fd, NULL, NULL);
-        if (client_fd < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            break;
+    while (!stop_server) {
+        mcp_socket_t client_fd = accept(server_fd, NULL, NULL);
+        if (!mcp_socket_valid(client_fd)) {
+            continue;
         }
-        handle_client(client_fd);
-        close(client_fd);
+        mcp_handle_client(client_fd, &stop_server, port);
+        mcp_close_socket(client_fd);
     }
 
-    close(server_fd);
+    mcp_close_socket(server_fd);
+    mcp_socket_cleanup();
     return 0;
 }
 
-BEX_EXPORT void bexFunction(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[])
-{
-    int status;
-    int port = BRIDGE_PORT;
-
-    if (nrhs > 0) {
-        int err = 0;
-        int requested_port = bxAsInt(prhs[0], &err);
-        if (err == 0 && requested_port > 0 && requested_port <= 65535) {
-            port = requested_port;
-        } else {
-            bxPrintf("Invalid MCP bridge port; using default %d\n", BRIDGE_PORT);
-        }
+void bexFunction(int nlhs, bxArray *plhs[], int nrhs, const bxArray *prhs[]) {
+    int port = mcp_parse_port(nlhs, plhs, nrhs, prhs);
+    if (port < 0) {
+        return;
     }
-
-    g_stop_requested = 0;
-    g_bridge_port = port;
-    bxPrintf("MCP bridge ready at %s:%d\n", BRIDGE_HOST, port);
-    status = server_loop(port);
-
-    if (nlhs > 0) {
-        plhs[0] = bxCreateDoubleScalar((double)status);
-    }
+    (void)mcp_listen_loop(port);
 }
