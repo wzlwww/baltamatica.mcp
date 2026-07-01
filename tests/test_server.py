@@ -76,6 +76,7 @@ def test_execute_code_delegates_to_engine() -> None:
         "output": "executed: disp(1 + 1)",
         "error": None,
         "artifacts": [],
+        "value": None,
         "backend": "cli",
     }
     assert engine.executed_code == ["disp(1 + 1)"]
@@ -105,6 +106,7 @@ def test_run_script_delegates_resolved_path_to_engine() -> None:
         "output": f"ran: {script_path}",
         "error": None,
         "artifacts": [],
+        "value": None,
         "backend": "cli",
     }
     assert engine.ran_scripts == [str(script_path)]
@@ -147,6 +149,7 @@ def test_clear_workspace_delegates_to_engine() -> None:
         "output": "cleared",
         "error": None,
         "artifacts": [],
+        "value": None,
         "backend": "cli",
     }
     assert engine.cleared is True
@@ -187,6 +190,7 @@ def test_get_variable_delegates_to_engine() -> None:
         "output": "value: A",
         "error": None,
         "artifacts": [],
+        "value": None,
         "backend": "cli",
     }
     assert engine.requested_variables == ["A"]

@@ -10,8 +10,9 @@
  * The bridge listens on 127.0.0.1:31415 and accepts newline-delimited JSON
  * requests matching docs/bex-protocol.md. PR7 intentionally keeps the C side
  * small: execute_code, run_script, clear_workspace, list_variables, and
- * get_variable are implemented with Baltamatica SDK APIs. Binary matrix
- * transfer remains a later PR.
+ * get_variable are implemented with Baltamatica SDK APIs. get_variable also
+ * includes a structured JSON value for small real numeric/logical arrays.
+ * Binary matrix transfer remains a later PR.
  *
  * The server loop intentionally runs on the BEX invocation thread. Calling
  * Baltamatica interpreter APIs from a background pthread is not reliable across
@@ -23,11 +24,13 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <math.h>
 #include <netinet/in.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -39,6 +42,7 @@
 #define MAX_COMMAND_SIZE 65536
 #define MAX_VARIABLES 512
 #define ARRAY_LINE_WIDTH 120
+#define MAX_VALUE_ELEMENTS 512
 
 static int g_stop_requested = 0;
 static int g_bridge_port = BRIDGE_PORT;
@@ -283,6 +287,284 @@ static void array_to_output(const bxArray *value, char *buffer, size_t buffer_si
     }
 }
 
+static void append_json(char *buffer, size_t buffer_size, size_t *used, const char *fmt, ...)
+{
+    va_list args;
+    int written;
+
+    if (*used >= buffer_size) {
+        return;
+    }
+
+    va_start(args, fmt);
+    written = vsnprintf(buffer + *used, buffer_size - *used, fmt, args);
+    va_end(args);
+
+    if (written < 0) {
+        return;
+    }
+    if (*used + (size_t)written >= buffer_size) {
+        *used = buffer_size - 1;
+        buffer[*used] = '\0';
+        return;
+    }
+    *used += (size_t)written;
+}
+
+static const char *class_name_from_id(bxClassID class_id)
+{
+    switch (class_id) {
+    case bxDOUBLE_CLASS:
+        return "double";
+    case bxSINGLE_CLASS:
+        return "single";
+    case bxINT8_CLASS:
+        return "int8";
+    case bxINT16_CLASS:
+        return "int16";
+    case bxINT32_CLASS:
+        return "int32";
+    case bxINT64_CLASS:
+        return "int64";
+    case bxUINT8_CLASS:
+        return "uint8";
+    case bxUINT16_CLASS:
+        return "uint16";
+    case bxUINT32_CLASS:
+        return "uint32";
+    case bxUINT64_CLASS:
+        return "uint64";
+    case bxLOGICAL_CLASS:
+        return "logical";
+    case bxCHAR_CLASS:
+        return "char";
+    case bxSTRING_CLASS:
+        return "string";
+    case bxSTRUCT_CLASS:
+        return "struct";
+    case bxCELL_CLASS:
+        return "cell";
+    case bxTABLE_CLASS:
+        return "table";
+    case bxTIMETABLE_CLASS:
+        return "timetable";
+    case bxDATETIME_CLASS:
+        return "datetime";
+    case bxDURATION_CLASS:
+        return "duration";
+    case bxCALENDAR_DURATION_CLASS:
+        return "calendar_duration";
+    case bxCATEGORICAL_CLASS:
+        return "categorical";
+    default:
+        return "unknown";
+    }
+}
+
+static bool append_value_number(const bxArray *value, baSize index, char *buffer, size_t buffer_size, size_t *used)
+{
+    bxClassID class_id = bxGetClassID(value);
+
+    switch (class_id) {
+    case bxDOUBLE_CLASS: {
+        const double *data = bxGetDoublesRO(value);
+        if (data == NULL) {
+            return false;
+        }
+        if (isfinite(data[index])) {
+            append_json(buffer, buffer_size, used, "%.17g", data[index]);
+        } else {
+            append_json(buffer, buffer_size, used, "null");
+        }
+        return true;
+    }
+    case bxSINGLE_CLASS: {
+        const float *data = bxGetSinglesRO(value);
+        if (data == NULL) {
+            return false;
+        }
+        if (isfinite((double)data[index])) {
+            append_json(buffer, buffer_size, used, "%.9g", (double)data[index]);
+        } else {
+            append_json(buffer, buffer_size, used, "null");
+        }
+        return true;
+    }
+    case bxINT8_CLASS: {
+        const int8_t *data = bxGetInt8sRO(value);
+        if (data == NULL) {
+            return false;
+        }
+        append_json(buffer, buffer_size, used, "%d", (int)data[index]);
+        return true;
+    }
+    case bxINT16_CLASS: {
+        const int16_t *data = bxGetInt16sRO(value);
+        if (data == NULL) {
+            return false;
+        }
+        append_json(buffer, buffer_size, used, "%d", (int)data[index]);
+        return true;
+    }
+    case bxINT32_CLASS: {
+        const int32_t *data = bxGetInt32sRO(value);
+        if (data == NULL) {
+            return false;
+        }
+        append_json(buffer, buffer_size, used, "%d", data[index]);
+        return true;
+    }
+    case bxINT64_CLASS: {
+        const int64_t *data = bxGetInt64sRO(value);
+        if (data == NULL) {
+            return false;
+        }
+        append_json(buffer, buffer_size, used, "%lld", (long long)data[index]);
+        return true;
+    }
+    case bxUINT8_CLASS: {
+        const uint8_t *data = bxGetUInt8sRO(value);
+        if (data == NULL) {
+            return false;
+        }
+        append_json(buffer, buffer_size, used, "%u", (unsigned int)data[index]);
+        return true;
+    }
+    case bxUINT16_CLASS: {
+        const uint16_t *data = bxGetUInt16sRO(value);
+        if (data == NULL) {
+            return false;
+        }
+        append_json(buffer, buffer_size, used, "%u", (unsigned int)data[index]);
+        return true;
+    }
+    case bxUINT32_CLASS: {
+        const uint32_t *data = bxGetUInt32sRO(value);
+        if (data == NULL) {
+            return false;
+        }
+        append_json(buffer, buffer_size, used, "%u", data[index]);
+        return true;
+    }
+    case bxUINT64_CLASS: {
+        const uint64_t *data = bxGetUInt64sRO(value);
+        if (data == NULL) {
+            return false;
+        }
+        append_json(buffer, buffer_size, used, "%llu", (unsigned long long)data[index]);
+        return true;
+    }
+    case bxLOGICAL_CLASS: {
+        const bool *data = bxGetLogicalsRO(value);
+        if (data == NULL) {
+            return false;
+        }
+        append_json(buffer, buffer_size, used, "%s", data[index] ? "true" : "false");
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+static bool is_structured_value_supported(const bxArray *value)
+{
+    bxClassID class_id = bxGetClassID(value);
+
+    if (bxIsComplex(value)) {
+        return false;
+    }
+
+    switch (class_id) {
+    case bxDOUBLE_CLASS:
+    case bxSINGLE_CLASS:
+    case bxINT8_CLASS:
+    case bxINT16_CLASS:
+    case bxINT32_CLASS:
+    case bxINT64_CLASS:
+    case bxUINT8_CLASS:
+    case bxUINT16_CLASS:
+    case bxUINT32_CLASS:
+    case bxUINT64_CLASS:
+    case bxLOGICAL_CLASS:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void array_to_json_value(const bxArray *value, char *buffer, size_t buffer_size)
+{
+    bxClassID class_id = bxGetClassID(value);
+    baSize ndim = bxGetNumberOfDimensions(value);
+    const baSize *dims = bxGetDimensions(value);
+    baSize elements = bxGetNumberOfElements(value);
+    baSize emitted = elements < MAX_VALUE_ELEMENTS ? elements : MAX_VALUE_ELEMENTS;
+    char size_text[128];
+    char escaped_class[256];
+    size_t used = 0;
+
+    if (buffer_size == 0) {
+        return;
+    }
+    buffer[0] = '\0';
+
+    format_size(value, size_text, sizeof(size_text));
+    json_escape(class_name_from_id(class_id), escaped_class, sizeof(escaped_class));
+
+    append_json(buffer, buffer_size, &used, "{\"supported\":");
+
+    if (!is_structured_value_supported(value)) {
+        append_json(
+            buffer,
+            buffer_size,
+            &used,
+            "false,\"type\":\"unsupported\",\"class_name\":\"%s\",\"size\":\"%s\","
+            "\"element_count\":%lld,\"reason\":\"Only real numeric and logical arrays are supported.\"}",
+            escaped_class,
+            size_text,
+            (long long)elements);
+        return;
+    }
+
+    append_json(
+        buffer,
+        buffer_size,
+        &used,
+        "true,\"type\":\"%s\",\"class_name\":\"%s\",\"size\":\"%s\",\"dims\":[",
+        class_id == bxLOGICAL_CLASS ? "logical_array" : "numeric_array",
+        escaped_class,
+        size_text);
+
+    if (ndim <= 0 || dims == NULL) {
+        append_json(buffer, buffer_size, &used, "%lld,%lld", (long long)bxGetM(value), (long long)bxGetN(value));
+    } else {
+        for (baSize i = 0; i < ndim; ++i) {
+            append_json(buffer, buffer_size, &used, "%s%lld", i == 0 ? "" : ",", (long long)dims[i]);
+        }
+    }
+
+    append_json(
+        buffer,
+        buffer_size,
+        &used,
+        "],\"encoding\":\"column-major\",\"element_count\":%lld,\"truncated\":%s,"
+        "\"data\":[",
+        (long long)elements,
+        elements > MAX_VALUE_ELEMENTS ? "true" : "false");
+
+    for (baSize i = 0; i < emitted; ++i) {
+        if (i > 0) {
+            append_json(buffer, buffer_size, &used, ",");
+        }
+        if (!append_value_number(value, i, buffer, buffer_size, &used)) {
+            append_json(buffer, buffer_size, &used, "null");
+        }
+    }
+
+    append_json(buffer, buffer_size, &used, "]}");
+}
+
 static void make_response(
     const char *id,
     bool success,
@@ -387,6 +669,7 @@ static void make_variable_list_response(
 static void make_variable_value_response(
     const char *id,
     const char *output,
+    const char *value_json,
     char *response,
     size_t response_size)
 {
@@ -398,9 +681,10 @@ static void make_variable_value_response(
     snprintf(
         response,
         response_size,
-        "{\"id\":\"%s\",\"success\":true,\"output\":\"%s\",\"artifacts\":[]}\n",
+        "{\"id\":\"%s\",\"success\":true,\"output\":\"%s\",\"value\":%s,\"artifacts\":[]}\n",
         escaped_id,
-        escaped_output);
+        escaped_output,
+        value_json ? value_json : "null");
 }
 
 static int eval_command(const char *command)
@@ -527,6 +811,7 @@ static void process_request(const char *request, char *response, size_t response
     if (strcmp(method, "get_variable") == 0) {
         bxArray *value = NULL;
         char output[MAX_FIELD_SIZE];
+        char value_json[MAX_FIELD_SIZE];
 
         if (!extract_json_string(request, "name", name, sizeof(name))) {
             make_response(id, false, "", "BAD_REQUEST", "Missing params.name.", response, response_size);
@@ -544,8 +829,9 @@ static void process_request(const char *request, char *response, size_t response
         }
 
         array_to_output(value, output, sizeof(output));
+        array_to_json_value(value, value_json, sizeof(value_json));
         bxDestroyArray(value);
-        make_variable_value_response(id, output, response, response_size);
+        make_variable_value_response(id, output, value_json, response, response_size);
         return;
     }
 

@@ -177,6 +177,7 @@ def _execution_result_from_response(response: dict[str, Any]) -> ExecutionResult
         output=_string_field(response, "output"),
         error=_error_from_response(response),
         artifacts=_artifacts_from_response(response),
+        value=_value_from_response(response),
     )
 
 
@@ -212,6 +213,11 @@ def _artifacts_from_response(response: dict[str, Any]) -> list[Artifact]:
             )
         )
     return artifacts
+
+
+def _value_from_response(response: dict[str, Any]) -> dict[str, Any] | None:
+    value = response.get("value")
+    return value if isinstance(value, dict) else None
 
 
 def _variables_from_response(response: dict[str, Any]) -> list[VariableInfo]:

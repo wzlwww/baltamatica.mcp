@@ -167,6 +167,43 @@ def test_list_variables_parses_variable_metadata() -> None:
     assert requests == [{"id": "1", "method": "list_variables", "params": {}}]
 
 
+def test_get_variable_preserves_structured_value_payload() -> None:
+    matrix_value = {
+        "supported": True,
+        "type": "numeric_array",
+        "class_name": "double",
+        "size": "2x2",
+        "dims": [2, 2],
+        "encoding": "column-major",
+        "element_count": 4,
+        "truncated": False,
+        "data": [1.0, 3.0, 2.0, 4.0],
+    }
+
+    async def exercise():
+        server, requests, port = await start_mock_bex_server(
+            lambda request, _: response_for(
+                request,
+                output="1 2\n3 4",
+                value=matrix_value,
+            )
+        )
+        engine = BexEngine(port=port, timeout=1)
+        try:
+            result = await engine.get_variable("A")
+        finally:
+            await engine.close()
+            await close_server(server)
+        return result, requests
+
+    result, requests = run(exercise())
+
+    assert result.success is True
+    assert result.output == "1 2\n3 4"
+    assert result.value == matrix_value
+    assert requests == [{"id": "1", "method": "get_variable", "params": {"name": "A"}}]
+
+
 def test_get_variable_returns_failed_execution_result_for_bex_error() -> None:
     async def exercise():
         server, requests, port = await start_mock_bex_server(

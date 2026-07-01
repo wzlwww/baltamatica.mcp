@@ -9,7 +9,8 @@ adds the first minimal C bridge in `bex/mcp_bridge.c`.
 - Keep the MCP tool contract identical across CLI and BEX backends.
 - Use a human-readable protocol that is simple to debug from either Python or C.
 - Preserve workspace state in the Baltamatica process that hosts the BEX plugin.
-- Leave binary matrix transfer and high-performance serialization for later PRs.
+- Return small real numeric/logical arrays as structured JSON while leaving
+  binary matrix transfer and high-performance serialization for later PRs.
 
 ## Transport
 
@@ -134,12 +135,16 @@ Response:
 
 ### `get_variable`
 
-Return a display representation of one variable. The result stays aligned with
-CLI mode by returning text in `output`; structured JSON values are planned for a
-later BEX serialization PR.
+Return one variable. The result stays aligned with CLI mode by returning text in
+`output`. BEX responses also include a `value` object for small real numeric and
+logical arrays.
 
 Status: implemented with `bxEvalIn("base", name, &value)` and
-`bxArrayToCStr(...)`. Variable names are validated before evaluation.
+`bxArrayToCStr(...)`. Variable names are validated before evaluation. The
+structured `value` object currently supports real numeric and logical arrays,
+uses column-major order, and truncates `data` after a bounded number of
+elements. Unsupported values still return `output` text and set
+`value.supported` to `false`.
 
 Request:
 
@@ -150,7 +155,23 @@ Request:
 Response:
 
 ```json
-{"id":"6","success":true,"output":"1 2\n3 4","artifacts":[]}
+{
+  "id": "6",
+  "success": true,
+  "output": "1 2\n3 4",
+  "value": {
+    "supported": true,
+    "type": "numeric_array",
+    "class_name": "double",
+    "size": "2x2",
+    "dims": [2, 2],
+    "encoding": "column-major",
+    "element_count": 4,
+    "truncated": false,
+    "data": [1, 3, 2, 4]
+  },
+  "artifacts": []
+}
 ```
 
 ### `status`

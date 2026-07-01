@@ -20,7 +20,7 @@
 - 📂 **管理脚本**：运行本地 `.m` 脚本文件
 - 🧹 **清空工作区**：重置计算环境
 
-**当前状态**：CLI 后端已经可用，支持执行代码、运行脚本、查询变量、读取变量和清空工作区。CLI 模式通过 `.mat` 状态文件在多次 MCP 调用之间保持工作区变量；BEX 后端已经包含 JSON 协议、Python TCP 客户端和实验性 BEX 桥接插件，可在 Baltamatica GUI 进程内执行代码、运行脚本、清空工作区、查询/读取工作区变量，并触发 GUI Figure 弹窗。BEX 变量值当前以文本形式返回，大数组会截断；结构化 JSON/二进制矩阵传输仍在后续 PR 中完成。
+**当前状态**：CLI 后端已经可用，支持执行代码、运行脚本、查询变量、读取变量和清空工作区。CLI 模式通过 `.mat` 状态文件在多次 MCP 调用之间保持工作区变量；BEX 后端已经包含 JSON 协议、Python TCP 客户端和实验性 BEX 桥接插件，可在 Baltamatica GUI 进程内执行代码、运行脚本、清空工作区、查询/读取工作区变量，并触发 GUI Figure 弹窗。BEX `get_variable` 会返回文本输出，并对小型实数数值/逻辑数组返回结构化 JSON；大数组会截断，二进制矩阵传输仍在后续 PR 中完成。
 
 ---
 
@@ -58,7 +58,7 @@
 | `execute_code` | ✅ | ✅ `eval` via `bxCallBaltamatica` |
 | `run_script` | ✅ | ✅ `run('...')` |
 | `list_variables` | ✅ `whos` 解析 | ✅ SDK 变量名 + 元数据 |
-| `get_variable` | ✅ `disp()` 文本 | ✅ `bxArrayToCStr` 文本 |
+| `get_variable` | ✅ `disp()` 文本 | ✅ 文本 + 小型实数数组 JSON |
 | `clear_workspace` | ✅ | ✅ `clear` |
 | 工作区状态保持 | ✅ `.mat` 状态文件 | ✅ GUI 进程内保持 |
 | GUI 画图弹窗 | ❌ headless CLI 边界 | ✅ GUI 进程加载后可弹 Figure |
@@ -115,7 +115,7 @@ addpath('/path/to/baltamatica.mcp'); mcp_bridge(31416)
 python -m baltamatica_mcp --backend bex --bex-host 127.0.0.1 --bex-port 31415
 ```
 
-限制：当前 BEX 桥接插件已实现 `execute_code`、`run_script`、`clear_workspace`、`list_variables` 和 `get_variable`。变量值先以文本形式返回；大数组输出会截断，结构化 JSON/二进制矩阵传输计划在后续序列化 PR 中完成。
+限制：当前 BEX 桥接插件已实现 `execute_code`、`run_script`、`clear_workspace`、`list_variables` 和 `get_variable`。变量值始终以文本形式返回；小型实数数值/逻辑数组还会附带结构化 JSON。大数组输出会截断，二进制矩阵传输计划在后续序列化 PR 中完成。
 
 ### 在 Claude Desktop 中配置
 
@@ -282,10 +282,11 @@ fprintf('BALTAMATICA_ARTIFACT=/tmp/plot.png\n');
 - [x] BEX 插件最小可用版：GUI 进程内执行代码和脚本
 - [x] BEX GUI 画图探针与 `plot(...)` Figure 弹窗验证
 - [x] BEX `list_variables` / `get_variable` 文本变量读取
+- [x] BEX 小型实数数值/逻辑数组结构化 JSON 读取
 
 ### 下一步
 
-- [ ] BEX 结构化变量序列化（JSON/二进制矩阵）
+- [ ] BEX 大矩阵二进制传输与复杂类型结构化序列化
 - [ ] BEX 图像/文件产物反馈插件侧补齐
 - [ ] BEX GUI 生命周期和自动化测试体验完善
 - [ ] 发布与安装体验完善

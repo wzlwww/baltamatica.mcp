@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 
 BackendName = Literal["auto", "cli", "bex"]
@@ -31,6 +31,7 @@ class ExecutionResult:
     output: str = ""
     error: str | None = None
     artifacts: list[Artifact] | None = None
+    value: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -38,6 +39,7 @@ class ExecutionResult:
             "output": self.output,
             "error": self.error,
             "artifacts": [artifact.to_dict() for artifact in self.artifacts or []],
+            "value": self.value,
         }
 
 
