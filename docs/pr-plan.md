@@ -141,11 +141,11 @@ Out of scope:
 - Binary payload transfer through MCP.
 - Automatic figure capture without an explicit saved file.
 
-### PR6: BEX Protocol Design
+### PR6: BEX Protocol Design and Plot Probe
 
 Branch: `codex/bex-protocol-design`
 
-Goal: define the Python-to-BEX protocol before implementing the C plugin.
+Goal: define the Python-to-BEX protocol and verify whether a GUI-loaded BEX can reach Baltamatica plotting.
 
 Implemented:
 
@@ -163,38 +163,53 @@ Implemented:
   - timeout handling
   - reconnect behavior
 - Add tests with a mock BEX TCP server.
+- Add `bex/bex_plot_probe.c` to test BEX SDK evaluation and `plot` calls.
+- Add `examples/bex_plot_probe_demo.m` for GUI-side verification.
+- Document that headless CLI can load BEX and run non-plot SDK calls, while `plot` is expected to fail there because the plotting stack is not available.
 
 Verification:
 
 - `PYTHONPATH=src pytest -q -m "not integration"`
 - `PYTHONPATH=src python -m compileall -q src tests`
+- `/Applications/Baltamatica.app/Contents/MacOS/bex bex/bex_plot_probe.c`
+- `BALTAMATICA_CLI=/Applications/Baltamatica.app/Contents/MacOS/baltamatica PYTHONPATH=src pytest -q`
+- GUI-loaded `bex_plot_probe()` returns `plot=0` and opens a native Figure window.
 
 Out of scope:
 
-- Real C plugin implementation.
+- Long-running BEX TCP bridge.
 - Binary matrix transfer.
-
-## Planned PRs
+- Saving or returning plot images.
 
 ### PR7: Minimal BEX Plugin
 
 Goal: provide the first real BEX backend path.
 
-Proposed implementation:
+Implemented:
 
-- Add BEX C plugin files:
-  - `mcp_bridge.c`
-  - protocol header
-  - build configuration
-- Start TCP socket listener inside Baltamatica.
-- Implement `execute_code` via BEX SDK evaluation APIs.
-- Return structured success/error responses to Python.
-- Add local/manual integration instructions.
+- Replace the BEX placeholder with `bex/mcp_bridge.c`.
+- Start a TCP socket listener inside the Baltamatica process that loads the BEX file.
+- Run the listener on the BEX invocation thread so interpreter and GUI plotting APIs are not called from a background pthread.
+- Bind to `127.0.0.1:31415`.
+- Accept newline-delimited JSON requests compatible with `backend_bex.py`.
+- Implement:
+  - `execute_code` through Baltamatica `eval` via `bxCallBaltamatica`
+  - `run_script` through `run('...')`
+  - `clear_workspace` through `clear`
+- Return structured success/error JSON responses.
+- Add integration coverage that compiles `mcp_bridge.c` with the real BEX compiler.
+- Add a real TCP smoke test that starts the bridge, executes code through `BexEngine`, verifies a failure response, and shuts the bridge down.
+- Add a debug-only `shutdown` method for automated bridge smoke tests.
+- Document the GUI bridge startup path in `README.md` and `docs/bex-protocol.md`.
 
 Out of scope:
 
 - High-performance binary variable transfer.
 - Full workspace serialization.
+- Capturing console output from evaluated code.
+- Saving or returning GUI figure images.
+
+## Planned PRs
 
 ### PR8: BEX Variable Access and Serialization
 
