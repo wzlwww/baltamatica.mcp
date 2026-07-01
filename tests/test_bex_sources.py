@@ -35,6 +35,11 @@ def test_bex_bridge_implements_sdk_entrypoint_and_minimal_methods() -> None:
     assert "mcp_array_is_stop_command" in source
     assert "bxGetCharsRO(value)" in source
     assert "bxIsString(value)" in source
+    assert "mcp_send_variable_binary" in source
+    assert "mcp_stream_base64" in source
+    assert "data_b64" in source
+    assert "bxGetComplexDoublesRO" in source
+    assert "bxGetString(value, i)" in source
     assert "mcp_send_shutdown_request" in source
     assert "mcp_set_close_on_exec(server_fd)" in source
     assert "mcp_array_is_background_command" in source

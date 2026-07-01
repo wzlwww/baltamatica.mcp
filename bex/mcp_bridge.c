@@ -971,6 +971,28 @@ static void mcp_array_to_output(const bxArray *value, char *buffer, size_t buffe
     }
 }
 
+/* Append a JSON-escaped string (without surrounding quotes) into the buffer. */
+static void mcp_append_escaped(char *buffer, size_t buffer_size, size_t *used, const char *text) {
+    const unsigned char *cursor = (const unsigned char *)(text ? text : "");
+    while (*cursor) {
+        unsigned char ch = *cursor++;
+        switch (ch) {
+        case '"':  mcp_append_json(buffer, buffer_size, used, "\\\""); break;
+        case '\\': mcp_append_json(buffer, buffer_size, used, "\\\\"); break;
+        case '\n': mcp_append_json(buffer, buffer_size, used, "\\n"); break;
+        case '\r': mcp_append_json(buffer, buffer_size, used, "\\r"); break;
+        case '\t': mcp_append_json(buffer, buffer_size, used, "\\t"); break;
+        default:
+            if (ch < 0x20) {
+                mcp_append_json(buffer, buffer_size, used, "\\u%04x", (unsigned int)ch);
+            } else {
+                mcp_append_json(buffer, buffer_size, used, "%c", (int)ch);
+            }
+            break;
+        }
+    }
+}
+
 static void mcp_array_to_json_value(const bxArray *value, char *buffer, size_t buffer_size) {
     bxClassID class_id = bxGetClassID(value);
     baSize ndim = bxGetNumberOfDimensions(value);
@@ -987,13 +1009,52 @@ static void mcp_array_to_json_value(const bxArray *value, char *buffer, size_t b
     mcp_format_size(value, size_text, sizeof(size_text));
     mcp_append_json(buffer, buffer_size, &used, "{\"supported\":");
 
+    if (class_id == bxCHAR_CLASS) {
+        char text[MCP_MAX_OUTPUT];
+        mcp_array_to_output(value, text, sizeof(text));
+        mcp_append_json(
+            buffer,
+            buffer_size,
+            &used,
+            "true,\"type\":\"char\",\"class_name\":\"char\",\"size\":\"%s\",\"element_count\":%lld,\"text\":\"",
+            size_text,
+            (long long)elements);
+        mcp_append_escaped(buffer, buffer_size, &used, text);
+        mcp_append_json(buffer, buffer_size, &used, "\"}");
+        return;
+    }
+
+    if (class_id == bxSTRING_CLASS) {
+        baSize cap = elements < MCP_MAX_VALUE_ELEMENTS ? elements : MCP_MAX_VALUE_ELEMENTS;
+        mcp_append_json(
+            buffer,
+            buffer_size,
+            &used,
+            "true,\"type\":\"string\",\"class_name\":\"string\",\"size\":\"%s\","
+            "\"element_count\":%lld,\"truncated\":%s,\"encoding\":\"column-major\",\"data\":[",
+            size_text,
+            (long long)elements,
+            elements > MCP_MAX_VALUE_ELEMENTS ? "true" : "false");
+        for (baSize i = 0; i < cap; ++i) {
+            const char *text = bxGetString(value, i);
+            if (i > 0) {
+                mcp_append_json(buffer, buffer_size, &used, ",");
+            }
+            mcp_append_json(buffer, buffer_size, &used, "\"");
+            mcp_append_escaped(buffer, buffer_size, &used, text);
+            mcp_append_json(buffer, buffer_size, &used, "\"");
+        }
+        mcp_append_json(buffer, buffer_size, &used, "]}");
+        return;
+    }
+
     if (!mcp_structured_value_supported(value)) {
         mcp_append_json(
             buffer,
             buffer_size,
             &used,
             "false,\"type\":\"unsupported\",\"class_name\":\"%s\",\"size\":\"%s\","
-            "\"element_count\":%lld,\"reason\":\"Only real numeric and logical arrays are supported.\"}",
+            "\"element_count\":%lld,\"reason\":\"Type not yet serialized; see output for text form.\"}",
             mcp_class_name_from_id(class_id),
             size_text,
             (long long)elements);
