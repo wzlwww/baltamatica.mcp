@@ -411,8 +411,61 @@ static int mcp_parse_request(const char *line, mcp_request_t *request, char *err
     return 1;
 }
 
+static void mcp_send_all(mcp_socket_t client_fd, const char *buffer, size_t length) {
+    size_t sent = 0;
+    while (sent < length) {
+        int chunk = send(client_fd, buffer + sent, (int)(length - sent), 0);
+        if (chunk <= 0) {
+            return;  /* peer closed or error; nothing else we can do here */
+        }
+        sent += (size_t)chunk;
+    }
+}
+
 static void mcp_send_text(mcp_socket_t client_fd, const char *text) {
-    send(client_fd, text, (int)strlen(text), 0);
+    mcp_send_all(client_fd, text, strlen(text));
+}
+
+/* Stream raw bytes as standard base64 without line breaks, sending in chunks so
+ * arbitrarily large arrays never need a full in-memory encode buffer. */
+static void mcp_stream_base64(mcp_socket_t client_fd, const unsigned char *data, size_t length) {
+    static const char table[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    char out[4096];
+    size_t out_index = 0;
+    size_t i = 0;
+
+    while (i + 3 <= length) {
+        unsigned int triple = ((unsigned int)data[i] << 16) |
+                              ((unsigned int)data[i + 1] << 8) |
+                              (unsigned int)data[i + 2];
+        out[out_index++] = table[(triple >> 18) & 0x3F];
+        out[out_index++] = table[(triple >> 12) & 0x3F];
+        out[out_index++] = table[(triple >> 6) & 0x3F];
+        out[out_index++] = table[triple & 0x3F];
+        i += 3;
+        if (out_index > sizeof(out) - 4) {
+            mcp_send_all(client_fd, out, out_index);
+            out_index = 0;
+        }
+    }
+
+    if (length - i == 1) {
+        unsigned int triple = (unsigned int)data[i] << 16;
+        out[out_index++] = table[(triple >> 18) & 0x3F];
+        out[out_index++] = table[(triple >> 12) & 0x3F];
+        out[out_index++] = '=';
+        out[out_index++] = '=';
+    } else if (length - i == 2) {
+        unsigned int triple = ((unsigned int)data[i] << 16) | ((unsigned int)data[i + 1] << 8);
+        out[out_index++] = table[(triple >> 18) & 0x3F];
+        out[out_index++] = table[(triple >> 12) & 0x3F];
+        out[out_index++] = table[(triple >> 6) & 0x3F];
+        out[out_index++] = '=';
+    }
+    if (out_index > 0) {
+        mcp_send_all(client_fd, out, out_index);
+    }
 }
 
 static void mcp_json_write_escaped(mcp_socket_t client_fd, const char *value) {
@@ -713,6 +766,75 @@ static int mcp_structured_value_supported(const bxArray *value) {
     }
 }
 
+/*
+ * Types that can be transferred as a raw column-major binary payload. Unlike
+ * mcp_structured_value_supported this includes complex double/single (stored
+ * interleaved re,im, which matches numpy complex layout). Integers are never
+ * complex in Baltamatica.
+ */
+static int mcp_binary_value_supported(const bxArray *value) {
+    switch (bxGetClassID(value)) {
+    case bxDOUBLE_CLASS:
+    case bxSINGLE_CLASS:
+    case bxINT8_CLASS:
+    case bxINT16_CLASS:
+    case bxINT32_CLASS:
+    case bxINT64_CLASS:
+    case bxUINT8_CLASS:
+    case bxUINT16_CLASS:
+    case bxUINT32_CLASS:
+    case bxUINT64_CLASS:
+    case bxLOGICAL_CLASS:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/*
+ * Resolve the read-only data pointer, byte length, and numpy-style dtype for a
+ * binary-supported array. Returns 1 on success (and fills the out params), 0 if
+ * the type is unsupported or the pointer could not be obtained.
+ */
+static int mcp_numeric_raw(const bxArray *value, const void **ptr, size_t *nbytes, const char **dtype) {
+    baSize elements = bxGetNumberOfElements(value);
+    size_t n = elements > 0 ? (size_t)elements : 0;
+    int is_complex = bxIsComplex(value);
+
+    *ptr = NULL;
+    *nbytes = 0;
+    *dtype = "";
+
+    switch (bxGetClassID(value)) {
+    case bxDOUBLE_CLASS:
+        if (is_complex) {
+            *ptr = bxGetComplexDoublesRO(value); *nbytes = n * 16; *dtype = "complex128";
+        } else {
+            *ptr = bxGetDoublesRO(value); *nbytes = n * 8; *dtype = "float64";
+        }
+        break;
+    case bxSINGLE_CLASS:
+        if (is_complex) {
+            *ptr = bxGetComplexSinglesRO(value); *nbytes = n * 8; *dtype = "complex64";
+        } else {
+            *ptr = bxGetSinglesRO(value); *nbytes = n * 4; *dtype = "float32";
+        }
+        break;
+    case bxINT8_CLASS:   *ptr = bxGetInt8sRO(value);   *nbytes = n;     *dtype = "int8";   break;
+    case bxINT16_CLASS:  *ptr = bxGetInt16sRO(value);  *nbytes = n * 2; *dtype = "int16";  break;
+    case bxINT32_CLASS:  *ptr = bxGetInt32sRO(value);  *nbytes = n * 4; *dtype = "int32";  break;
+    case bxINT64_CLASS:  *ptr = bxGetInt64sRO(value);  *nbytes = n * 8; *dtype = "int64";  break;
+    case bxUINT8_CLASS:  *ptr = bxGetUInt8sRO(value);  *nbytes = n;     *dtype = "uint8";  break;
+    case bxUINT16_CLASS: *ptr = bxGetUInt16sRO(value); *nbytes = n * 2; *dtype = "uint16"; break;
+    case bxUINT32_CLASS: *ptr = bxGetUInt32sRO(value); *nbytes = n * 4; *dtype = "uint32"; break;
+    case bxUINT64_CLASS: *ptr = bxGetUInt64sRO(value); *nbytes = n * 8; *dtype = "uint64"; break;
+    case bxLOGICAL_CLASS: *ptr = bxGetLogicalsRO(value); *nbytes = n;   *dtype = "bool";   break;
+    default:
+        return 0;
+    }
+    return *ptr != NULL;
+}
+
 static void mcp_append_json(char *buffer, size_t buffer_size, size_t *used, const char *fmt, ...) {
     va_list args;
     int written;
@@ -921,6 +1043,60 @@ static void mcp_send_variable_value(mcp_socket_t client_fd, const char *id, cons
     mcp_send_text(client_fd, ",\"artifacts\":[]}\n");
 }
 
+/*
+ * Stream a full-fidelity numeric/logical value: metadata plus a base64 payload
+ * of the raw column-major bytes. The payload is streamed directly to the socket
+ * so there is no size cap and no truncation, regardless of how large the array
+ * is. The Python side decodes data_b64 with the given dtype and dims.
+ */
+static void mcp_send_variable_binary(mcp_socket_t client_fd, const char *id, const char *output, const bxArray *value) {
+    const void *ptr = NULL;
+    size_t nbytes = 0;
+    const char *dtype = "";
+    char scratch[160];
+    baSize ndim = bxGetNumberOfDimensions(value);
+    const baSize *dims = bxGetDimensions(value);
+    baSize elements = bxGetNumberOfElements(value);
+
+    if (!mcp_numeric_raw(value, &ptr, &nbytes, &dtype)) {
+        /* Should not happen for binary-supported types, but stay well-defined. */
+        mcp_send_error(client_fd, id, BALTAMATICA_MCP_ERROR_VARIABLE, "Unable to read variable data.");
+        return;
+    }
+
+    mcp_send_text(client_fd, "{\"id\":\"");
+    mcp_json_write_escaped(client_fd, id);
+    mcp_send_text(client_fd, "\",\"success\":true,\"output\":\"");
+    mcp_json_write_escaped(client_fd, output ? output : "");
+    mcp_send_text(client_fd, "\",\"value\":{\"supported\":true,\"type\":\"ndarray\",\"class_name\":\"");
+    mcp_json_write_escaped(client_fd, mcp_class_name_from_id(bxGetClassID(value)));
+
+    mcp_format_size(value, scratch, sizeof(scratch));
+    mcp_send_text(client_fd, "\",\"size\":\"");
+    mcp_json_write_escaped(client_fd, scratch);
+
+    mcp_send_text(client_fd, "\",\"dtype\":\"");
+    mcp_send_text(client_fd, dtype);
+    mcp_send_text(client_fd, "\",\"complexity\":\"");
+    mcp_send_text(client_fd, bxIsComplex(value) ? "complex" : "real");
+    mcp_send_text(client_fd, "\",\"byte_order\":\"little\",\"encoding\":\"base64\",\"dims\":[");
+    if (ndim <= 0 || dims == NULL) {
+        snprintf(scratch, sizeof(scratch), "%lld,%lld", (long long)bxGetM(value), (long long)bxGetN(value));
+        mcp_send_text(client_fd, scratch);
+    } else {
+        for (baSize i = 0; i < ndim; ++i) {
+            snprintf(scratch, sizeof(scratch), "%s%lld", i == 0 ? "" : ",", (long long)dims[i]);
+            mcp_send_text(client_fd, scratch);
+        }
+    }
+    snprintf(scratch, sizeof(scratch), "],\"element_count\":%lld,\"data_b64\":\"", (long long)elements);
+    mcp_send_text(client_fd, scratch);
+
+    mcp_stream_base64(client_fd, (const unsigned char *)ptr, nbytes);
+
+    mcp_send_text(client_fd, "\"},\"artifacts\":[]}\n");
+}
+
 static void mcp_send_variable_list(mcp_socket_t client_fd, const char *id) {
     const char **names = NULL;
     int name_count = 0;
@@ -1041,9 +1217,15 @@ static void mcp_handle_request(mcp_socket_t client_fd, const mcp_request_t *requ
             return;
         }
         mcp_array_to_output(value, output, sizeof(output));
-        mcp_array_to_json_value(value, value_json, sizeof(value_json));
+        if (mcp_binary_value_supported(value)) {
+            /* Full-fidelity numeric/logical transfer: stream raw bytes as base64. */
+            mcp_send_variable_binary(client_fd, request->id, output, value);
+        } else {
+            /* char/string/struct/cell/etc.: text output plus an "unsupported" marker. */
+            mcp_array_to_json_value(value, value_json, sizeof(value_json));
+            mcp_send_variable_value(client_fd, request->id, output, value_json);
+        }
         bxDestroyArray(value);
-        mcp_send_variable_value(client_fd, request->id, output, value_json);
         return;
     }
 

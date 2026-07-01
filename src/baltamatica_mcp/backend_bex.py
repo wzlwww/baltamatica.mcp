@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from typing import Any
 
 from baltamatica_mcp.engine import (
@@ -14,6 +15,7 @@ from baltamatica_mcp.engine import (
     VariableInfo,
     VariableListResult,
 )
+from baltamatica_mcp.serializer import present_binary_value
 
 DEFAULT_BEX_HOST = "127.0.0.1"
 DEFAULT_BEX_PORT = 31415
@@ -76,7 +78,16 @@ class BexEngine:
 
     async def get_variable(self, name: str) -> ExecutionResult:
         response = await self._request("get_variable", {"name": name})
-        return _execution_result_from_response(response)
+        result = _execution_result_from_response(response)
+        value = result.value
+        if isinstance(value, dict) and "data_b64" in value:
+            presented, artifacts = present_binary_value(value, name=name)
+            result = replace(
+                result,
+                value=presented,
+                artifacts=(result.artifacts or []) + artifacts,
+            )
+        return result
 
     async def close(self) -> None:
         """Close the current TCP connection, if one is open."""

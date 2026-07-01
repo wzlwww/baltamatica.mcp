@@ -149,13 +149,15 @@ Response:
 ### `get_variable`
 
 Return one variable. The result stays aligned with CLI mode by returning text in
-`output`. BEX responses also include a `value` object for small real numeric and
-logical arrays.
+`output`. For numeric and logical arrays (real **and** complex, of any size) the
+BEX response also carries a full-fidelity binary `value`: the raw column-major
+bytes are streamed as base64 `data_b64` with a numpy-style `dtype`, so there is
+no truncation. Unsupported values (char/string/struct/cell/…) still return
+`output` text and set `value.supported` to `false`.
 
-The structured `value` object currently supports real numeric and logical
-arrays, uses column-major order, and truncates `data` after a bounded number of
-elements. Unsupported values still return `output` text and set
-`value.supported` to `false`.
+The Python client (`serializer.py`) decodes `data_b64` and presents it to the
+model: small arrays are inlined as nested lists; large arrays get a summary,
+preview, and a lossless `.npy` file artifact.
 
 Request:
 
@@ -163,7 +165,7 @@ Request:
 {"id":"6","method":"get_variable","params":{"name":"A"}}
 ```
 
-Response:
+Wire response (bridge → Python):
 
 ```json
 {
@@ -172,16 +174,38 @@ Response:
   "output": "1 2\n3 4",
   "value": {
     "supported": true,
-    "type": "numeric_array",
+    "type": "ndarray",
     "class_name": "double",
+    "dtype": "float64",
+    "complexity": "real",
     "size": "2x2",
     "dims": [2, 2],
-    "encoding": "column-major",
+    "byte_order": "little",
+    "encoding": "base64",
     "element_count": 4,
-    "truncated": false,
-    "data": [1, 3, 2, 4]
+    "data_b64": "AAAAAAAA8D8AAAAAAAAIQAAAAAAAAABAAAAAAAAAEEA="
   },
   "artifacts": []
+}
+```
+
+`dtype` follows numpy naming: `float64`/`float32`, `int8`…`int64`,
+`uint8`…`uint64`, `bool`, and `complex128`/`complex64` (interleaved re,im, which
+matches numpy's complex memory layout). `data_b64` holds the exact column-major
+bytes in little-endian order.
+
+Presented value (Python → model) for a small array:
+
+```json
+{
+  "class_name": "double",
+  "dtype": "float64",
+  "complexity": "real",
+  "shape": [2, 2],
+  "size": "2x2",
+  "element_count": 4,
+  "truncated": false,
+  "data": [[1, 2], [3, 4]]
 }
 ```
 
