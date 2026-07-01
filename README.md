@@ -20,13 +20,13 @@
 - 📂 **管理脚本**：运行本地 `.m` 脚本文件
 - 🧹 **清空工作区**：重置计算环境
 
-**当前状态**：CLI 后端已经可用，支持执行代码、运行脚本、查询变量、读取变量和清空工作区。CLI 模式通过 `.mat` 状态文件在多次 MCP 调用之间保持工作区变量；BEX 长连接后端仍在规划中。
+**当前状态**：CLI 后端已经可用，支持执行代码、运行脚本、查询变量、读取变量和清空工作区。CLI 模式通过 `.mat` 状态文件在多次 MCP 调用之间保持工作区变量；BEX JSON 协议与 Python TCP 客户端骨架已经就绪，真实 BEX 插件实现仍在后续规划中。
 
 ---
 
 ## 🏗️ 系统架构
 
-当前实现优先提供 **CLI fallback 后端**，通过北太天元命令行入口执行代码，并用 `.mat` 状态文件保持工作区变量。后续将扩展 **BEX 插件 + TCP Socket** 后端，用于更低延迟和更高性能的数据访问。
+当前实现优先提供 **CLI fallback 后端**，通过北太天元命令行入口执行代码，并用 `.mat` 状态文件保持工作区变量。BEX 路径已定义 **JSON-over-TCP** 协议和 Python 客户端骨架，后续将补齐真实 **BEX 插件 + TCP Socket** 后端，用于更低延迟和更高性能的数据访问。
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -52,15 +52,15 @@
 
 ### 后端状态
 
-| 特性 | CLI 后端（已实现） | BEX 后端（规划中） |
+| 特性 | CLI 后端（已实现） | BEX 后端（协议/客户端骨架） |
 |:---|:---:|:---:|
-| `execute_code` | ✅ | 规划中 |
-| `run_script` | ✅ | 规划中 |
-| `list_variables` | ✅ `whos` 解析 | 规划中 |
-| `get_variable` | ✅ `disp()` 文本 | 规划中 |
-| `clear_workspace` | ✅ | 规划中 |
-| 工作区状态保持 | ✅ `.mat` 状态文件 | 规划中，长连接天然保持 |
-| 图像/文件产物反馈 | ✅ 文件 artifact marker | 规划中 |
+| `execute_code` | ✅ | 客户端协议已定义，需 BEX 插件 |
+| `run_script` | ✅ | 客户端协议已定义，需 BEX 插件 |
+| `list_variables` | ✅ `whos` 解析 | 客户端协议已定义，需 BEX 插件 |
+| `get_variable` | ✅ `disp()` 文本 | 客户端协议已定义，需 BEX 插件 |
+| `clear_workspace` | ✅ | 客户端协议已定义，需 BEX 插件 |
+| 工作区状态保持 | ✅ `.mat` 状态文件 | 协议支持，长连接天然保持 |
+| 图像/文件产物反馈 | ✅ 文件 artifact marker | 协议支持 artifact 列表 |
 
 ---
 
@@ -85,7 +85,12 @@ pip install -e .
 
 ### BEX 插件状态
 
-BEX 后端仍在规划中，当前仓库只包含占位源码。日常试用请先使用 CLI 后端。
+BEX JSON 协议见 [docs/bex-protocol.md](docs/bex-protocol.md)。Python 端已经包含
+`--backend bex` 客户端骨架，可连接未来 BEX 插件提供的 TCP 服务；当前仓库的 C 插件仍是占位源码，日常试用请先使用 CLI 后端。
+
+```bash
+python -m baltamatica_mcp --backend bex --bex-host 127.0.0.1 --bex-port 31415
+```
 
 ### 在 Claude Desktop 中配置
 
@@ -179,16 +184,19 @@ baltamatica.mcp/
 │   ├── server.py           # MCP Server & Tool 注册
 │   ├── engine.py           # 后端协议与结果类型
 │   ├── backend_cli.py      # CLI 后端：subprocess + .mat 状态文件
+│   ├── backend_bex.py      # BEX JSON-over-TCP 客户端骨架
 │   └── serializer.py       # 后续变量序列化占位
 ├── bex/
 │   └── mcp_bridge.c        # 后续 BEX 插件占位
 ├── tests/
 │   ├── test_backend_cli.py
+│   ├── test_backend_bex.py
 │   ├── test_integration_cli.py
 │   ├── test_server.py
 │   └── fixtures/sample_script.m
 ├── docs/
 │   ├── contributing.md
+│   ├── bex-protocol.md
 │   └── pr-plan.md
 └── examples/
     ├── monte_carlo_pi.m
@@ -201,11 +209,11 @@ baltamatica.mcp/
 
 | Tool 名称 | 参数 | 描述 | CLI 后端 | BEX 后端 |
 |:---|:---|:---|:---:|:---:|
-| `execute_code` | `code: string` | 执行代码并返回控制台输出 | ✅ | 规划中 |
-| `run_script` | `file_path: string` | 运行 `.m` 脚本文件 | ✅ | 规划中 |
-| `list_variables` | — | 列出工作区所有变量（名称、类型、维度） | ✅ `whos` 解析 | 规划中 |
-| `get_variable` | `name: string` | 获取变量显示值 | ✅ `disp()` 文本 | 规划中 |
-| `clear_workspace` | — | 清空工作区状态 | ✅ | 规划中 |
+| `execute_code` | `code: string` | 执行代码并返回控制台输出 | ✅ | 客户端骨架 |
+| `run_script` | `file_path: string` | 运行 `.m` 脚本文件 | ✅ | 客户端骨架 |
+| `list_variables` | — | 列出工作区所有变量（名称、类型、维度） | ✅ `whos` 解析 | 客户端骨架 |
+| `get_variable` | `name: string` | 获取变量显示值 | ✅ `disp()` 文本 | 客户端骨架 |
+| `clear_workspace` | — | 清空工作区状态 | ✅ | 客户端骨架 |
 
 ### 文件产物反馈
 
@@ -240,10 +248,10 @@ fprintf('BALTAMATICA_ARTIFACT=/tmp/plot.png\n');
 - [x] 可选真实集成测试与 GitHub Actions CI
 - [x] 数值计算示例：`examples/numerical_pipeline_demo.m`
 - [x] 文件产物反馈：`BALTAMATICA_ARTIFACT=...`
+- [x] BEX JSON 协议设计与 Python TCP 客户端骨架
 
 ### 下一步
 
-- [ ] BEX JSON 协议设计
 - [ ] BEX 插件最小可用版
 - [ ] BEX 变量读取与序列化
 - [ ] 发布与安装体验完善

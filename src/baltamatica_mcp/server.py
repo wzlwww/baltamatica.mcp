@@ -147,6 +147,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Path or command name for baltamaticaC.sh. Defaults to BALTAMATICA_CLI or PATH.",
     )
     parser.add_argument(
+        "--bex-host",
+        default="127.0.0.1",
+        help="Host for the BEX JSON TCP bridge.",
+    )
+    parser.add_argument(
+        "--bex-port",
+        type=int,
+        default=31415,
+        help="Port for the BEX JSON TCP bridge.",
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=30.0,
@@ -167,6 +178,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     engine = create_engine(
         args.backend,
         cli_executable=args.cli_executable,
+        bex_host=args.bex_host,
+        bex_port=args.bex_port,
         timeout=args.timeout,
         state_file=args.state_file,
     )

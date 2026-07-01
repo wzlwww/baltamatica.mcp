@@ -143,14 +143,15 @@ def create_engine(
     backend: BackendName = "auto",
     *,
     cli_executable: str | None = None,
+    bex_host: str = "127.0.0.1",
+    bex_port: int = 31415,
     timeout: float = 30.0,
     state_file: str | Path | None = None,
 ) -> BaltamaticaEngine:
     """Create the engine selected by CLI configuration.
 
-    Phase 1 wires the MCP surface and keeps the backend boundary explicit.
-    Concrete CLI and BEX implementations will replace this placeholder in
-    follow-up PRs without changing the MCP tool contract.
+    CLI mode runs Baltamatica through the command-line runtime. BEX mode connects
+    to the JSON-over-TCP bridge implemented by the Baltamatica plugin.
     """
 
     if backend not in {"auto", "cli", "bex"}:
@@ -159,4 +160,7 @@ def create_engine(
         from baltamatica_mcp.backend_cli import CliEngine
 
         return CliEngine(executable=cli_executable, timeout=timeout, state_file=state_file)
-    return UnimplementedEngine(backend=backend)
+
+    from baltamatica_mcp.backend_bex import BexEngine
+
+    return BexEngine(host=bex_host, port=bex_port, timeout=timeout)

@@ -141,13 +141,13 @@ Out of scope:
 - Binary payload transfer through MCP.
 - Automatic figure capture without an explicit saved file.
 
-## Planned PRs
-
 ### PR6: BEX Protocol Design
+
+Branch: `codex/bex-protocol-design`
 
 Goal: define the Python-to-BEX protocol before implementing the C plugin.
 
-Proposed implementation:
+Implemented:
 
 - Add `docs/bex-protocol.md`.
 - Define request/response JSON schema for:
@@ -164,10 +164,17 @@ Proposed implementation:
   - reconnect behavior
 - Add tests with a mock BEX TCP server.
 
+Verification:
+
+- `PYTHONPATH=src pytest -q -m "not integration"`
+- `PYTHONPATH=src python -m compileall -q src tests`
+
 Out of scope:
 
 - Real C plugin implementation.
 - Binary matrix transfer.
+
+## Planned PRs
 
 ### PR7: Minimal BEX Plugin
 

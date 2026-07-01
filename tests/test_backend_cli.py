@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from baltamatica_mcp.backend_bex import BexEngine
 from baltamatica_mcp.backend_cli import CliEngine, parse_artifacts, parse_whos_output
 from baltamatica_mcp.engine import EngineUnavailableError, create_engine
 
@@ -18,6 +19,15 @@ def write_executable(path: Path, body: str) -> Path:
 
 
 def write_python_executable(path: Path, body: str) -> Path:
+    if os.name == "nt":
+        script_path = path.with_suffix(".py")
+        script_path.write_text(body, encoding="utf-8")
+        wrapper_path = path.with_suffix(".cmd")
+        wrapper_path.write_text(
+            f'@echo off\r\n"{sys.executable}" "{script_path}" %*\r\n',
+            encoding="utf-8",
+        )
+        return wrapper_path
     return write_executable(path, f"#!{sys.executable}\n{body}")
 
 
@@ -30,9 +40,10 @@ def test_create_engine_returns_cli_for_cli_and_auto() -> None:
     assert isinstance(create_engine("auto"), CliEngine)
 
 
-def test_create_engine_keeps_bex_unimplemented() -> None:
+def test_create_engine_returns_bex_for_bex_backend() -> None:
     engine = create_engine("bex")
 
+    assert isinstance(engine, BexEngine)
     assert engine.backend == "bex"
 
 
@@ -55,11 +66,11 @@ def test_execute_code_runs_baltamatica_cli(tmp_path: Path) -> None:
 
 
 def test_execute_code_returns_nonzero_exit_as_failed_result(tmp_path: Path) -> None:
-    executable = write_executable(
+    executable = write_python_executable(
         tmp_path / "fake-baltamatica",
-        "#!/bin/sh\n"
-        "echo 'bad code' >&2\n"
-        "exit 7\n",
+        "import sys\n"
+        "print('bad code', file=sys.stderr)\n"
+        "sys.exit(7)\n",
     )
     engine = CliEngine(executable=str(executable), timeout=10, state_file=tmp_path / "state.mat")
 
@@ -77,7 +88,7 @@ def test_execute_code_parses_artifact_marker(tmp_path: Path) -> None:
     executable = write_python_executable(
         tmp_path / "fake-baltamatica",
         "import sys\n"
-        f"print('BALTAMATICA_ARTIFACT={artifact_path}')\n",
+        f"print('BALTAMATICA_ARTIFACT={artifact_path.as_posix()}')\n",
     )
     engine = CliEngine(executable=str(executable), timeout=10, state_file=tmp_path / "state.mat")
 
@@ -117,10 +128,9 @@ def test_missing_configured_executable_raises_unavailable(tmp_path: Path) -> Non
 
 
 def test_environment_executable_is_used(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    executable = write_executable(
+    executable = write_python_executable(
         tmp_path / "fake-baltamatica",
-        "#!/bin/sh\n"
-        "echo env-executable\n",
+        "print('env-executable')\n",
     )
     monkeypatch.setenv("BALTAMATICA_CLI", str(executable))
     engine = CliEngine(timeout=10)
@@ -132,10 +142,10 @@ def test_environment_executable_is_used(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_timeout_kills_process(tmp_path: Path) -> None:
-    executable = write_executable(
+    executable = write_python_executable(
         tmp_path / "fake-baltamatica",
-        "#!/bin/sh\n"
-        "sleep 2\n",
+        "import time\n"
+        "time.sleep(2)\n",
     )
     engine = CliEngine(executable=str(executable), timeout=0.1)
 
@@ -144,10 +154,10 @@ def test_timeout_kills_process(tmp_path: Path) -> None:
 
 
 def test_path_lookup_uses_command_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    executable = write_executable(
-        tmp_path / "baltamaticaC.sh",
-        "#!/bin/sh\n"
-        "echo path-lookup\n",
+    executable_name = "baltamaticaC.cmd" if os.name == "nt" else "baltamaticaC.sh"
+    executable = write_python_executable(
+        tmp_path / executable_name,
+        "print('path-lookup')\n",
     )
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
     engine = CliEngine(executable=executable.name, timeout=10)
@@ -176,15 +186,12 @@ def test_clear_workspace_removes_state_file(tmp_path: Path) -> None:
 
 
 def test_list_variables_parses_whos_output(tmp_path: Path) -> None:
-    executable = write_executable(
+    executable = write_python_executable(
         tmp_path / "fake-baltamatica",
-        "#!/bin/sh\n"
-        "cat <<'EOF'\n"
-        "  Name  Size  Bytes  Class   Attributes\n"
-        "\n"
-        "  A     2x2      32  double\n"
-        "  label 1x5      10  char    global\n"
-        "EOF\n",
+        "print('  Name  Size  Bytes  Class   Attributes')\n"
+        "print()\n"
+        "print('  A     2x2      32  double')\n"
+        "print('  label 1x5      10  char    global')\n",
     )
     engine = CliEngine(executable=str(executable), timeout=10, state_file=tmp_path / "state.mat")
 
