@@ -303,10 +303,11 @@ fprintf('BALTAMATICA_ARTIFACT=/tmp/plot.png\n');
 - [x] BEX 数值/逻辑二进制全保真传输（含复数）+ 字符/字符串/结构体/元胞结构化序列化
 - [x] BEX `set_variable`：从标量/向量/矩阵注入工作区变量（`bxAddVariable`）
 
+- [x] BEX `execute_code` 控制台输出捕获（`evalc` + `try/catch`，成功返回 stdout、失败返回错误信息）
+
 ### 下一步
 
 - [ ] BEX `set_variable` 扩展：整数/复数类型、大数据流式接收（当前 float64/bool、受请求行大小限制）
-- [ ] BEX `execute_code` 控制台输出捕获（当前仅返回成功/错误，不含 stdout）
 - [ ] BEX 图形导出到文件：北太天元缺 `saveas`/`print`/`exportgraphics`，需绘图探针（`bex/bex_plot_probe.c`）或原生导出路径
 - [ ] `background` 模式跨线程调用解释器的线程安全评估
 - [ ] 发布与安装体验完善（PR9：安装说明、故障排查、PyPI 元数据、BEX 二进制发布）

@@ -68,6 +68,10 @@ typedef pthread_t mcp_thread_t;
 #define MCP_MAX_STRUCT_ELEMENTS 64
 #define MCP_MAX_CELL_ELEMENTS 256
 
+/* Control-char sentinel (unit separators) that a normal disp/fprintf never
+ * emits; marks the start of a captured error message in execute_code output. */
+#define MCP_ERR_MARKER "\x1fMCP_EXEC_ERROR\x1f"
+
 typedef struct mcp_request_t {
     char id[BALTAMATICA_MCP_MAX_ID];
     char method[BALTAMATICA_MCP_MAX_METHOD];
@@ -715,6 +719,72 @@ static int mcp_eval_command(const char *command) {
     status = bxCallBaltamatica(0, NULL, 1, (const bxArray **)args, "eval");
     bxDestroyArray(args[0]);
     return status;
+}
+
+/*
+ * Run user code with evalc so its console output is captured, wrapped in
+ * try/catch so an error becomes captured text (prefixed by MCP_ERR_MARKER)
+ * instead of aborting. On return: *captured holds the text, and the function
+ * result is 0 on success or 1 if the code raised an error.
+ */
+static int mcp_eval_capture(const char *code, char *captured, size_t captured_size, int *is_error) {
+    char *wrapped;
+    bxArray *args[1];
+    bxArray *plhs[1] = {NULL};
+    char *marker;
+    int status;
+    size_t wrapped_size = strlen(code) + sizeof(MCP_ERR_MARKER) + 128;
+
+    *is_error = 0;
+    if (captured_size > 0) {
+        captured[0] = '\0';
+    }
+
+    wrapped = (char *)malloc(wrapped_size);
+    if (wrapped == NULL) {
+        return 1;
+    }
+    /* clear of a never-created variable is silent, so cleanup is unconditional. */
+    snprintf(
+        wrapped,
+        wrapped_size,
+        "try; %s; catch mcp_err__; fprintf('" MCP_ERR_MARKER "%%s', mcp_err__); end; clear mcp_err__",
+        code);
+
+    args[0] = bxCreateString(wrapped);
+    free(wrapped);
+    if (args[0] == NULL) {
+        return 1;
+    }
+    status = bxCallBaltamatica(1, plhs, 1, (const bxArray **)args, "evalc");
+    bxDestroyArray(args[0]);
+
+    if (status != 0) {
+        /* evalc itself failed (e.g. syntax error before try/catch took hold). */
+        if (plhs[0] != NULL) {
+            bxDestroyArray(plhs[0]);
+        }
+        *is_error = 1;
+        return 1;
+    }
+
+    if (plhs[0] != NULL) {
+        if (bxAsCStr(plhs[0], captured, (baSize)captured_size) < 0 && captured_size > 0) {
+            captured[0] = '\0';
+        }
+        bxDestroyArray(plhs[0]);
+    }
+
+    marker = strstr(captured, MCP_ERR_MARKER);
+    if (marker != NULL) {
+        /* Shift the error message to the front and drop the sentinel + any
+         * partial stdout that preceded it. */
+        memmove(captured, marker + strlen(MCP_ERR_MARKER),
+                strlen(marker + strlen(MCP_ERR_MARKER)) + 1);
+        *is_error = 1;
+        return 1;
+    }
+    return 0;
 }
 
 static int mcp_is_valid_variable_name(const char *name) {
@@ -1483,9 +1553,13 @@ static void mcp_handle_request(mcp_socket_t client_fd, const mcp_request_t *requ
     }
 
     if (strcmp(request->method, BALTAMATICA_MCP_METHOD_EXECUTE_CODE) == 0) {
-        int status = mcp_eval_command(request->code);
+        char captured[MCP_MAX_OUTPUT];
+        int is_error = 0;
+        int status = mcp_eval_capture(request->code, captured, sizeof(captured), &is_error);
         if (status == 0) {
-            mcp_send_success(client_fd, request->id, "");
+            mcp_send_success(client_fd, request->id, captured);
+        } else if (is_error && captured[0] != '\0') {
+            mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_EVAL, captured);
         } else {
             mcp_send_error(
                 client_fd,
