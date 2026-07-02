@@ -235,7 +235,10 @@ def test_get_variable_preserves_structured_value_payload() -> None:
 
     assert result.success is True
     assert result.output == "1 2\n3 4"
-    assert result.value == matrix_value
+    # numeric_array JSON payloads are reshaped column-major -> row-major.
+    assert result.value["data"] == [[1.0, 2.0], [3.0, 4.0]]
+    assert result.value["dims"] == [2, 2]
+    assert result.value["class_name"] == "double"
     assert requests == [{"id": "1", "method": "get_variable", "params": {"name": "A"}}]
 
 

@@ -8,6 +8,7 @@ import pytest
 from baltamatica_mcp.serializer import (
     MAX_INLINE_ELEMENTS,
     present_binary_value,
+    present_structured,
 )
 
 
@@ -124,3 +125,28 @@ def test_non_binary_value_passes_through() -> None:
     out, artifacts = present_binary_value(value, name="c")
     assert out is value
     assert artifacts == []
+
+
+def test_present_structured_reshapes_nested_numeric_in_cell() -> None:
+    # cell {[1 2;3 4], 'text'}; matrix stored column-major as [1,3,2,4]
+    cell = {
+        "type": "cell",
+        "dims": [1, 2],
+        "data": [
+            {"type": "numeric_array", "dims": [2, 2], "data": [1, 3, 2, 4]},
+            {"type": "char", "text": "text"},
+        ],
+    }
+    out = present_structured(cell)
+    assert out["data"][0]["data"] == [[1, 2], [3, 4]]  # row-major
+    assert out["data"][1] == {"type": "char", "text": "text"}
+
+
+def test_present_structured_reshapes_struct_fields() -> None:
+    struct = {
+        "type": "struct",
+        "fields": ["xy"],
+        "data": [{"xy": {"type": "numeric_array", "dims": [2, 2], "data": [1, 3, 2, 4]}}],
+    }
+    out = present_structured(struct)
+    assert out["data"][0]["xy"]["data"] == [[1, 2], [3, 4]]

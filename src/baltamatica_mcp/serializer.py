@@ -95,6 +95,37 @@ def present_binary_value(value: dict[str, Any], *, name: str) -> tuple[dict[str,
     return presented, [artifact]
 
 
+def present_structured(node: Any) -> Any:
+    """Recursively tidy a non-binary structured value (char/string/struct/cell).
+
+    Nested numeric/logical leaves arrive as a bounded column-major ``data`` list;
+    reshape them to row-major nested lists so they read like the top-level binary
+    values. char/string nodes are returned as-is. Non-dict inputs pass through.
+    """
+
+    if not isinstance(node, dict):
+        return node
+
+    kind = node.get("type")
+    if kind in ("numeric_array", "logical_array") and "data" in node and "dims" in node:
+        reshaped = dict(node)
+        reshaped["data"] = _nest(node["data"], [int(d) for d in node["dims"]])
+        return reshaped
+    if kind == "struct":
+        reshaped = dict(node)
+        reshaped["data"] = [
+            {k: present_structured(v) for k, v in element.items()}
+            for element in node.get("data", [])
+            if isinstance(element, dict)
+        ]
+        return reshaped
+    if kind == "cell":
+        reshaped = dict(node)
+        reshaped["data"] = [present_structured(v) for v in node.get("data", [])]
+        return reshaped
+    return node
+
+
 def _decode(raw: bytes, code: str, kind: str, element_count: int) -> list[Any]:
     if element_count == 0:
         return []

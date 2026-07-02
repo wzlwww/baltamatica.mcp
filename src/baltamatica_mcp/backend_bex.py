@@ -15,7 +15,7 @@ from baltamatica_mcp.engine import (
     VariableInfo,
     VariableListResult,
 )
-from baltamatica_mcp.serializer import present_binary_value
+from baltamatica_mcp.serializer import present_binary_value, present_structured
 
 DEFAULT_BEX_HOST = "127.0.0.1"
 DEFAULT_BEX_PORT = 31415
@@ -87,6 +87,13 @@ class BexEngine:
                 value=presented,
                 artifacts=(result.artifacts or []) + artifacts,
             )
+        elif isinstance(value, dict) and value.get("type") in {
+            "numeric_array",
+            "logical_array",
+            "struct",
+            "cell",
+        }:
+            result = replace(result, value=present_structured(value))
         return result
 
     async def close(self) -> None:

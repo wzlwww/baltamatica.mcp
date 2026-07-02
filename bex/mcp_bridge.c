@@ -1024,7 +1024,11 @@ static void mcp_append_value(const bxArray *value, char *buffer, size_t buffer_s
 
     if (class_id == bxCHAR_CLASS) {
         char text[MCP_MAX_OUTPUT];
-        mcp_array_to_output(value, text, sizeof(text));
+        /* Prefer the clean string form (e.g. "hello"); fall back to the display
+         * form for multi-row char matrices that bxAsCStr cannot convert. */
+        if (bxAsCStr(value, text, (baSize)sizeof(text)) < 0) {
+            mcp_array_to_output(value, text, sizeof(text));
+        }
         mcp_append_json(
             buffer, buffer_size, used,
             "true,\"type\":\"char\",\"class_name\":\"char\",\"size\":\"%s\",\"element_count\":%lld,\"text\":\"",
