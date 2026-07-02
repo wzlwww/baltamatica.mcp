@@ -66,7 +66,7 @@
 | `run_script` | ✅ | ✅ `evalc` 捕获输出 |
 | `list_variables` | ✅ `whos` 解析 | ✅ SDK 变量枚举 |
 | `get_variable` | ✅ `disp()` 文本 | ✅ 二进制全保真 + 结构化 JSON |
-| `set_variable` | ✅ 字面量代码 | ✅ `bxAddVariable`（float64/bool） |
+| `set_variable` | ✅ 字面量代码 | ✅ `bxAddVariable`（整数/浮点/复数/bool） |
 | `clear_workspace` | ✅ | ✅ `clear` |
 | 工作区状态保持 | ✅ `.mat` 状态文件 | ✅ BEX 进程长连接 |
 | 文件产物反馈 | ✅ artifact marker | ✅ 从捕获输出解析 marker |
@@ -262,7 +262,10 @@ baltamatica.mcp/
 │   ├── bex-plugin.md
 │   ├── bex-bridge.md
 │   ├── bex-plot-probe.md
+│   ├── releasing.md
 │   └── pr-plan.md
+├── scripts/
+│   └── build_bex.sh        # 用北太天元 bex 编译器编译本平台桥接二进制
 └── examples/
     ├── monte_carlo_pi.m
     ├── numerical_pipeline_demo.m
@@ -332,11 +335,12 @@ fprintf('BALTAMATICA_ARTIFACT=/tmp/plot.png\n');
 - [x] 发布体验：`baltamatica-mcp` 控制台入口、项目 URL、`set_variable` 工具与文档
 
 - [x] BEX `set_variable` 扩展：整数（int8..uint64）/浮点（float32/64）/复数（complex64/128）类型 + 缓冲读取大 payload（上限约 16 MB）
+- [x] 打包就绪：`python -m build` 可出 sdist/wheel、控制台入口、`scripts/build_bex.sh` 编译桥接二进制、发布流程见 [docs/releasing.md](docs/releasing.md)
 
 ### 下一步
 
 - [ ] BEX 图形导出到文件：受限于北太天元本身缺少 `saveas`/`print`/`exportgraphics` 等函数，需厂商侧支持
-- [ ] 打包发布到 PyPI，提供预编译的 BEX 二进制
+- [ ] 实际发布到 PyPI 并附带预编译 BEX 二进制的 GitHub Release（需维护者执行 `twine upload` + 各平台编译）
 
 ---
 
