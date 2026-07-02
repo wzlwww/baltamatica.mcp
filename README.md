@@ -14,53 +14,62 @@
 
 通过本项目，AI 代理可以：
 
-- 🧮 **执行代码**：直接在北太天元中运行 `.m` 脚本或单行表达式
-- 📊 **读取变量**：获取工作区中矩阵、向量、结构体等变量的值
+- 🧮 **执行代码**：直接在北太天元中运行 `.m` 脚本或单行表达式，并取回控制台输出
+- 📊 **读取变量**：获取工作区中矩阵、向量、结构体、元胞等变量的值（BEX 后端二进制全保真）
+- ✍️ **写入变量**：把标量/向量/矩阵注入工作区（`set_variable`）
 - 🔍 **查询状态**：列出当前工作区中所有变量的名称、类型和维度
 - 📂 **管理脚本**：运行本地 `.m` 脚本文件
 - 🧹 **清空工作区**：重置计算环境
 
-**当前状态**：CLI 后端已经可用，支持执行代码、运行脚本、查询变量、读取变量和清空工作区。CLI 模式通过 `.mat` 状态文件在多次 MCP 调用之间保持工作区变量；BEX 后端已经包含 JSON 协议、Python TCP 客户端和实验性 BEX 桥接插件，可在 Baltamatica GUI 进程内执行代码、运行脚本、清空工作区、查询/读取工作区变量，并触发 GUI Figure 弹窗。BEX `get_variable` 会返回文本输出，并对小型实数数值/逻辑数组返回结构化 JSON；大数组会截断，二进制矩阵传输仍在后续 PR 中完成。
+**当前状态**：两套后端均可用。
+
+- **CLI 后端**：通过北太天元命令行入口执行代码，用 `.mat` 状态文件在多次 MCP 调用之间保持工作区变量。支持全部 6 个工具。
+- **BEX 后端**：在北太天元 GUI 进程内运行的 C 桥接（JSON-over-TCP），支持 `execute_code`、`run_script`、`list_variables`、`get_variable`、`set_variable`、`clear_workspace`：
+  - `get_variable` 对数值/逻辑数组（实数**和复数**、任意大小）走 base64 二进制全保真回传，对字符/字符串/结构体/元胞走结构化 JSON；
+  - `set_variable` 用 `bxAddVariable` 把标量/向量/矩阵注入工作区；
+  - `execute_code` / `run_script` 用 `evalc` 捕获控制台输出并解析 `BALTAMATICA_ARTIFACT=` 文件产物；
+  - 桥接生命周期健壮（可靠 `stop`、Ctrl-C 恢复、`background` 模式），并可触发 GUI Figure 弹窗（但北太天元本身无图形导出函数，见下）。
 
 ---
 
 ## 🏗️ 系统架构
 
-当前实现优先提供 **CLI fallback 后端**，通过北太天元命令行入口执行代码，并用 `.mat` 状态文件保持工作区变量。BEX 路径已定义 **JSON-over-TCP** 协议，并包含一个最小 **BEX + TCP Socket** 桥接源码，用于验证低延迟长连接后端。
+项目提供两套后端。**CLI 后端**通过北太天元命令行入口执行代码，用 `.mat` 状态文件保持工作区变量，无需编译，适合快速上手。**BEX 后端**是一个在北太天元 GUI 进程内运行的 C 桥接，走 **JSON-over-TCP**，提供进程内低延迟长连接、二进制变量传输和变量注入。两者暴露相同的 MCP 工具集。
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                AI Agent (Claude Code / Cursor / Codex)   │
+│            AI Agent (Claude Code / Cursor / Codex)         │
 └─────────────────────────┬────────────────────────────────┘
                           │ MCP Protocol (stdio)
                           ▼
 ┌──────────────────────────────────────────────────────────┐
-│               Python MCP Server (baltamatica-mcp)        │
-│                                                          │
-│  execute_code / run_script / list_variables              │
-│  get_variable / clear_workspace                          │
-│                                                          │
-│             Engine Dispatcher                            │
-│                    │                                     │
-│                    ▼                                     │
-│             CLI Backend                                  │
-│      subprocess + .mat state file                        │
-└────────────────────┬─────────────────────────────────────┘
-                     ▼
-        Baltamatica CLI: baltamatica -nodesktop -s "..."
+│               Python MCP Server (baltamatica-mcp)          │
+│  execute_code / run_script / list_variables /              │
+│  get_variable / set_variable / clear_workspace             │
+│                     Engine Dispatcher                      │
+└───────────────┬──────────────────────────┬───────────────┘
+                │ (--backend cli)           │ (--backend bex)
+                ▼                           ▼
+     ┌────────────────────┐      ┌──────────────────────────┐
+     │    CLI Backend     │      │       BEX Backend        │
+     │ subprocess + .mat  │      │  JSON-over-TCP client    │
+     └─────────┬──────────┘      └────────────┬─────────────┘
+               ▼                               ▼
+   baltamatica -nodesktop -s "…"    mcp_bridge (BEX in GUI, TCP 31415)
 ```
 
 ### 后端状态
 
-| 特性 | CLI 后端（已实现） | BEX 后端（实验桥接） |
+| 特性 | CLI 后端 | BEX 后端 |
 |:---|:---:|:---:|
-| `execute_code` | ✅ | ✅ SDK `eval` |
-| `run_script` | ✅ | ✅ SDK `eval("run(...)")` |
+| `execute_code` | ✅ | ✅ `evalc` 捕获输出 |
+| `run_script` | ✅ | ✅ `evalc` 捕获输出 |
 | `list_variables` | ✅ `whos` 解析 | ✅ SDK 变量枚举 |
-| `get_variable` | ✅ `disp()` 文本 | ✅ 文本 + 小数组结构化 JSON |
+| `get_variable` | ✅ `disp()` 文本 | ✅ 二进制全保真 + 结构化 JSON |
+| `set_variable` | ✅ 字面量代码 | ✅ `bxAddVariable`（float64/bool） |
 | `clear_workspace` | ✅ | ✅ `clear` |
 | 工作区状态保持 | ✅ `.mat` 状态文件 | ✅ BEX 进程长连接 |
-| 图像/文件产物反馈 | ✅ 文件 artifact marker | 协议支持 artifact 列表 |
+| 文件产物反馈 | ✅ artifact marker | ✅ 从捕获输出解析 marker |
 
 ---
 
@@ -71,7 +80,7 @@
 - Python 3.10+
 - [北太天元 2025](https://www.baltamatica.com/download.html)（社区版即可）
 - 北太天元命令行入口（macOS 通常是 `/Applications/Baltamatica.app/Contents/MacOS/baltamatica`）
-- C 编译器（可选，后续 BEX 插件开发需要）
+- C 编译器（仅使用 BEX 后端时需要；北太天元自带 `bex` 编译器会调用系统 clang/gcc）
 
 ### 安装
 
@@ -128,10 +137,10 @@ PYTHONPATH=src python -m baltamatica_mcp.bex_shutdown
 
 **已知限制**：
 
-- `get_variable` 已支持:数值/逻辑数组(实数**和复数**、任意大小)走 base64 二进制全保真回传;字符/字符串/结构体/元胞走结构化 JSON。极大的结构体/元胞会按上限截断(见 `truncated` 字段);结构体/元胞里嵌套的数值目前是列主序扁平数组。
-- `execute_code` 暂不捕获控制台输出（计算结果请用 `get_variable` 取回）。
-- 屏幕绘图可用（`figure`/`plot` 等会在 GUI 弹窗），但**图形导出到文件不可用**——遍查北太天元全部 3736 个文档函数,均无 `saveas`/`print`/`exportgraphics`/`getframe`/`imwrite` 等图形导出函数(这是北太天元本身的能力缺失)。替代方案:用 `get_variable` 取回绘图数据由 AI 端渲染,或用 `writematrix`/`writetable`/`save` 把数据导出成文件 + `BALTAMATICA_ARTIFACT=` 标记回传(见下)。
-- 日常稳定试用仍可优先使用 CLI 后端。
+- `get_variable`：数值/逻辑数组（实数**和复数**、任意大小）走 base64 二进制全保真回传；字符/字符串/结构体/元胞走结构化 JSON。极大的结构体/元胞会按上限截断（见 `truncated` 字段）；结构体/元胞里嵌套的数值目前是列主序扁平数组。
+- `set_variable`：目前支持 float64 和 bool、二维以内；受请求行大小限制（约 4500 个 double），暂不支持整数/复数类型和超大数据的流式接收。
+- 屏幕绘图可用（`figure`/`plot` 等会在 GUI 弹窗），但**图形导出到文件不可用**——遍查北太天元全部 3736 个文档函数，均无 `saveas`/`print`/`exportgraphics`/`getframe`/`imwrite` 等图形导出函数（这是北太天元本身的能力缺失）。替代方案：用 `get_variable` 取回绘图数据由 AI 端渲染，或用 `writematrix`/`writetable`/`save` 把数据导出成文件 + `BALTAMATICA_ARTIFACT=` 标记回传（见下）。
+- CLI 后端无需编译、跨平台，适合快速上手；BEX 后端功能更全（二进制传输、变量注入、输出捕获）。
 
 **文件产物反馈(BEX 也支持)**:`execute_code` / `run_script` 现在捕获控制台输出,脚本用
 `fprintf('BALTAMATICA_ARTIFACT=text/csv:/tmp/x.csv\n')` 声明的文件会被解析进返回的
@@ -195,7 +204,7 @@ codex mcp add baltamatica \
 ```
 
 配置后可通过 MCP 工具调用 `execute_code`、`run_script`、`list_variables`、
-`get_variable` 和 `clear_workspace`。
+`get_variable`、`set_variable` 和 `clear_workspace`。
 
 ### 开发测试
 
@@ -229,27 +238,36 @@ baltamatica.mcp/
 │   ├── server.py           # MCP Server & Tool 注册
 │   ├── engine.py           # 后端协议与结果类型
 │   ├── backend_cli.py      # CLI 后端：subprocess + .mat 状态文件
-│   ├── backend_bex.py      # BEX JSON-over-TCP 客户端骨架
-│   └── serializer.py       # 后续变量序列化占位
+│   ├── backend_bex.py      # BEX JSON-over-TCP 客户端
+│   ├── serializer.py       # 变量二进制解码/编码与结构化呈现
+│   └── bex_shutdown.py     # 纯 TCP 关闭 BEX 桥接的兜底工具
 ├── bex/
 │   ├── CMakeLists.txt      # BEX CMake 构建配置
 │   ├── mcp_protocol.h      # BEX JSON 协议常量
-│   └── mcp_bridge.c        # 最小 BEX TCP 桥接源码
+│   ├── mcp_bridge.c        # BEX TCP 桥接源码（主体）
+│   └── bex_plot_probe.c    # 绘图能力探针
 ├── tests/
 │   ├── test_backend_cli.py
 │   ├── test_backend_bex.py
+│   ├── test_serializer.py
 │   ├── test_bex_sources.py
-│   ├── test_integration_cli.py
+│   ├── test_bex_shutdown.py
 │   ├── test_server.py
+│   ├── test_integration_cli.py   # 标记 integration
+│   ├── test_integration_bex.py   # 标记 integration
 │   └── fixtures/sample_script.m
 ├── docs/
 │   ├── contributing.md
 │   ├── bex-protocol.md
 │   ├── bex-plugin.md
+│   ├── bex-bridge.md
+│   ├── bex-plot-probe.md
 │   └── pr-plan.md
 └── examples/
     ├── monte_carlo_pi.m
-    └── numerical_pipeline_demo.m
+    ├── numerical_pipeline_demo.m
+    ├── artifact_export_demo.m
+    └── bex_plot_probe_demo.m
 ```
 
 ---
@@ -258,12 +276,12 @@ baltamatica.mcp/
 
 | Tool 名称 | 参数 | 描述 | CLI 后端 | BEX 后端 |
 |:---|:---|:---|:---:|:---:|
-| `execute_code` | `code: string` | 执行代码并返回控制台输出 | ✅ | ✅ 最小桥接 |
-| `run_script` | `file_path: string` | 运行 `.m` 脚本文件 | ✅ | ✅ 最小桥接 |
+| `execute_code` | `code: string` | 执行代码并返回控制台输出 | ✅ | ✅ `evalc` 捕获输出 |
+| `run_script` | `file_path: string` | 运行 `.m` 脚本文件 | ✅ | ✅ `evalc` 捕获输出 |
 | `list_variables` | — | 列出工作区所有变量（名称、类型、维度） | ✅ `whos` 解析 | ✅ SDK 变量枚举 |
 | `get_variable` | `name: string` | 获取变量值 | ✅ `disp()` 文本 | ✅ 二进制全保真 + 结构化 JSON |
-| `set_variable` | `name: string, data` | 创建/覆盖工作区变量 | ✅ 字面量代码 | ✅ `bxAddVariable`(float64/bool) |
-| `clear_workspace` | — | 清空工作区状态 | ✅ | ✅ 最小桥接 |
+| `set_variable` | `name: string, data` | 创建/覆盖工作区变量 | ✅ 字面量代码 | ✅ `bxAddVariable`（float64/bool） |
+| `clear_workspace` | — | 清空工作区状态 | ✅ | ✅ `clear` |
 
 ### 文件产物反馈
 
@@ -306,22 +324,18 @@ fprintf('BALTAMATICA_ARTIFACT=/tmp/plot.png\n');
 - [x] BEX `get_variable` 存在性预检查（避免不存在变量在 GUI 里回显 `evalin` 错误）
 - [x] BEX 数值/逻辑二进制全保真传输（含复数）+ 字符/字符串/结构体/元胞结构化序列化
 - [x] BEX `set_variable`：从标量/向量/矩阵注入工作区变量（`bxAddVariable`）
-
-- [x] BEX `execute_code` 控制台输出捕获（`evalc` + `try/catch`，成功返回 stdout、失败返回错误信息）
-- [x] BEX 文件产物反馈：从捕获输出解析 `BALTAMATICA_ARTIFACT=` 标记（`run_script` 也捕获输出）
+- [x] BEX `execute_code` / `run_script` 控制台输出捕获（`evalc` + `try/catch`，成功返回 stdout、失败返回错误信息）
+- [x] BEX 文件产物反馈：从捕获输出解析 `BALTAMATICA_ARTIFACT=` 标记
 - [x] 绘图导出调研：确认北太天元无任何图形导出函数（3736 个函数全查），改走数据侧回传
-
-- [x] `background` 模式线程安全评估：桥接串行化所有请求(800 顺序 + 并发双连接零错误);唯一风险是后台模式下手动同时操作 GUI（见 [docs/bex-bridge.md](docs/bex-bridge.md) 线程与并发一节）
+- [x] `background` 模式线程安全评估：桥接串行化所有请求（800 顺序 + 并发双连接零错误）；唯一风险是后台模式下手动同时操作 GUI（见 [docs/bex-bridge.md](docs/bex-bridge.md) 线程与并发一节）
 - [x] 自动化 BEX 集成测试（`bex` 编译校验 + 运行中桥接往返，标记 `integration`）
 - [x] 发布体验：`baltamatica-mcp` 控制台入口、项目 URL、`set_variable` 工具与文档
 
 ### 下一步
 
 - [ ] BEX `set_variable` 扩展：整数/复数类型、大数据流式接收（当前 float64/bool、受请求行大小限制）
-- [ ] BEX GUI 图形导出（受限于北太天元本身缺少导出函数，需厂商支持）
-- [ ] BEX 图形导出到文件：北太天元缺 `saveas`/`print`/`exportgraphics`，需绘图探针（`bex/bex_plot_probe.c`）或原生导出路径
-- [ ] `background` 模式跨线程调用解释器的线程安全评估
-- [ ] 发布与安装体验完善（PR9：安装说明、故障排查、PyPI 元数据、BEX 二进制发布）
+- [ ] BEX 图形导出到文件：受限于北太天元本身缺少 `saveas`/`print`/`exportgraphics` 等函数，需厂商侧支持
+- [ ] 打包发布到 PyPI，提供预编译的 BEX 二进制
 
 ---
 
@@ -337,10 +351,16 @@ fprintf('BALTAMATICA_ARTIFACT=/tmp/plot.png\n');
 | `bxGetVariableNames(result, num)` | 获取当前工作区所有变量名 |
 | `bxAddVariable(name, value, mode)` | 向工作区注入变量 |
 | `bxRemoveVariable(name)` | 删除工作区变量 |
-| `bxGetDoublesRO(ba)` | 只读获取浮点矩阵数据指针 |
+| `bxGetDoublesRO/bxGetComplexDoublesRO/...(ba)` | 只读获取各类型矩阵数据指针（二进制回传） |
+| `bxCreateDoubleMatrix/bxCreateLogicalMatrix(...)` | 创建矩阵（`set_variable` 注入） |
+| `bxGetDoublesRW/bxGetLogicalsRW(ba)` | 读写数据指针（写入注入的数据） |
+| `bxGetString / bxGetFieldByNumberRO / bxGetCellRO` | 读取字符串/结构体字段/元胞元素（结构化序列化） |
 | `bxGetDimensions(ba)` | 获取数组维度信息 |
 | `bxGetClassID(ba)` | 获取变量的数据类型 |
-| `bxArrayToCStr(ba, ...)` | 将变量格式化为字符串输出 |
+| `bxArrayToCStr(ba, ...)` / `bxAsCStr(ba, ...)` | 将变量格式化/转换为字符串 |
+| `bxPrintf(...)` | 向命令行窗口输出（桥接状态信息） |
+
+`execute_code` / `run_script` 通过 `bxCallBaltamatica` 调用内置的 `evalc` 函数捕获控制台输出。
 
 ---
 
