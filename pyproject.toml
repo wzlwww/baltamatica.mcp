@@ -32,6 +32,14 @@ dev = [
     "ruff>=0.1.0",
 ]
 
+[project.scripts]
+baltamatica-mcp = "baltamatica_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/wzlwww/baltamatica.mcp"
+Repository = "https://github.com/wzlwww/baltamatica.mcp"
+Issues = "https://github.com/wzlwww/baltamatica.mcp/issues"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/baltamatica_mcp"]
 

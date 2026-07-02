@@ -312,11 +312,13 @@ fprintf('BALTAMATICA_ARTIFACT=/tmp/plot.png\n');
 - [x] 绘图导出调研：确认北太天元无任何图形导出函数（3736 个函数全查），改走数据侧回传
 
 - [x] `background` 模式线程安全评估：桥接串行化所有请求(800 顺序 + 并发双连接零错误);唯一风险是后台模式下手动同时操作 GUI（见 [docs/bex-bridge.md](docs/bex-bridge.md) 线程与并发一节）
+- [x] 自动化 BEX 集成测试（`bex` 编译校验 + 运行中桥接往返，标记 `integration`）
+- [x] 发布体验：`baltamatica-mcp` 控制台入口、项目 URL、`set_variable` 工具与文档
 
 ### 下一步
 
 - [ ] BEX `set_variable` 扩展：整数/复数类型、大数据流式接收（当前 float64/bool、受请求行大小限制）
-- [ ] 自动化 BEX 集成测试 + 发布体验（Phase 7）
+- [ ] BEX GUI 图形导出（受限于北太天元本身缺少导出函数，需厂商支持）
 - [ ] BEX 图形导出到文件：北太天元缺 `saveas`/`print`/`exportgraphics`，需绘图探针（`bex/bex_plot_probe.c`）或原生导出路径
 - [ ] `background` 模式跨线程调用解释器的线程安全评估
 - [ ] 发布与安装体验完善（PR9：安装说明、故障排查、PyPI 元数据、BEX 二进制发布）
