@@ -125,11 +125,14 @@ def create_mcp_server(engine: BaltamaticaEngine | None = None) -> FastMCP:
         return _success_response(result, selected_engine.backend)
 
     @mcp.tool()
-    async def set_variable(name: str, data: Any) -> dict[str, object]:
+    async def set_variable(name: str, data: Any, dtype: str | None = None) -> dict[str, object]:
         """Create or overwrite a workspace variable.
 
         `data` may be a number, a boolean, a 1-D list (row vector), or a 2-D
-        nested list (matrix). Numbers become double, booleans become logical.
+        nested list (matrix). Without `dtype`, numbers become double and booleans
+        become logical. `dtype` may request an integer type (`int8`..`uint64`),
+        `float32`/`float64`, or a complex type (`complex64`/`complex128`, with
+        `data={"real": <array>, "imag": <array>}`).
         """
 
         if not name.strip():
@@ -139,7 +142,7 @@ def create_mcp_server(engine: BaltamaticaEngine | None = None) -> FastMCP:
             )
 
         try:
-            result = await selected_engine.set_variable(name.strip(), data)
+            result = await selected_engine.set_variable(name.strip(), data, dtype)
         except Exception as exc:
             return _error_response(exc, selected_engine.backend)
         return _success_response(result, selected_engine.backend)

@@ -661,14 +661,37 @@ static void mcp_send_error(
     mcp_send_text(client_fd, "\"},\"artifacts\":[]}\n");
 }
 
-static int mcp_recv_line(mcp_socket_t client_fd, char *line, size_t line_size) {
+/*
+ * Buffered line reader. Reads from the socket in 64 KB chunks and hands back one
+ * newline-terminated line at a time, so large requests (e.g. a multi-megabyte
+ * set_variable payload) do not cost one recv() syscall per byte.
+ */
+typedef struct mcp_reader_t {
+    mcp_socket_t fd;
+    size_t len;
+    size_t pos;
+    char buf[65536];
+} mcp_reader_t;
+
+static void mcp_reader_init(mcp_reader_t *reader, mcp_socket_t fd) {
+    reader->fd = fd;
+    reader->len = 0;
+    reader->pos = 0;
+}
+
+static int mcp_reader_getline(mcp_reader_t *reader, char *line, size_t line_size) {
     size_t index = 0;
     while (index + 1 < line_size) {
         char ch;
-        int received = recv(client_fd, &ch, 1, 0);
-        if (received <= 0) {
-            return 0;
+        if (reader->pos >= reader->len) {
+            int received = recv(reader->fd, reader->buf, (int)sizeof(reader->buf), 0);
+            if (received <= 0) {
+                return 0;
+            }
+            reader->len = (size_t)received;
+            reader->pos = 0;
         }
+        ch = reader->buf[reader->pos++];
         if (ch == '\n') {
             line[index] = '\0';
             return 1;
@@ -1468,9 +1491,52 @@ static void mcp_send_variable_list(mcp_socket_t client_fd, const char *id) {
 }
 
 /*
+ * Create an empty matrix for the given numpy-style dtype. Sets *item_size to the
+ * bytes per element (complex counts both components) and *is_bool for logical.
+ * Returns NULL for an unsupported dtype.
+ */
+static bxArray *mcp_create_typed_matrix(const char *dtype, baSize m, baSize n, size_t *item_size, int *is_bool) {
+    *is_bool = 0;
+    *item_size = 0;
+    if (strcmp(dtype, "float64") == 0)    { *item_size = 8;  return bxCreateDoubleMatrix(m, n, bxREAL); }
+    if (strcmp(dtype, "float32") == 0)    { *item_size = 4;  return bxCreateNumericMatrix(m, n, bxSINGLE_CLASS, bxREAL); }
+    if (strcmp(dtype, "complex128") == 0) { *item_size = 16; return bxCreateDoubleMatrix(m, n, bxCOMPLEX); }
+    if (strcmp(dtype, "complex64") == 0)  { *item_size = 8;  return bxCreateNumericMatrix(m, n, bxSINGLE_CLASS, bxCOMPLEX); }
+    if (strcmp(dtype, "int8") == 0)   { *item_size = 1; return bxCreateNumericMatrix(m, n, bxINT8_CLASS, bxREAL); }
+    if (strcmp(dtype, "int16") == 0)  { *item_size = 2; return bxCreateNumericMatrix(m, n, bxINT16_CLASS, bxREAL); }
+    if (strcmp(dtype, "int32") == 0)  { *item_size = 4; return bxCreateNumericMatrix(m, n, bxINT32_CLASS, bxREAL); }
+    if (strcmp(dtype, "int64") == 0)  { *item_size = 8; return bxCreateNumericMatrix(m, n, bxINT64_CLASS, bxREAL); }
+    if (strcmp(dtype, "uint8") == 0)  { *item_size = 1; return bxCreateNumericMatrix(m, n, bxUINT8_CLASS, bxREAL); }
+    if (strcmp(dtype, "uint16") == 0) { *item_size = 2; return bxCreateNumericMatrix(m, n, bxUINT16_CLASS, bxREAL); }
+    if (strcmp(dtype, "uint32") == 0) { *item_size = 4; return bxCreateNumericMatrix(m, n, bxUINT32_CLASS, bxREAL); }
+    if (strcmp(dtype, "uint64") == 0) { *item_size = 8; return bxCreateNumericMatrix(m, n, bxUINT64_CLASS, bxREAL); }
+    if (strcmp(dtype, "bool") == 0)   { *item_size = 1; *is_bool = 1; return bxCreateLogicalMatrix(m, n); }
+    return NULL;
+}
+
+static void *mcp_writable_data(bxArray *array) {
+    int is_complex = bxIsComplex(array);
+    switch (bxGetClassID(array)) {
+    case bxDOUBLE_CLASS:  return is_complex ? (void *)bxGetComplexDoublesRW(array) : (void *)bxGetDoublesRW(array);
+    case bxSINGLE_CLASS:  return is_complex ? (void *)bxGetComplexSinglesRW(array) : (void *)bxGetSinglesRW(array);
+    case bxINT8_CLASS:    return (void *)bxGetInt8sRW(array);
+    case bxINT16_CLASS:   return (void *)bxGetInt16sRW(array);
+    case bxINT32_CLASS:   return (void *)bxGetInt32sRW(array);
+    case bxINT64_CLASS:   return (void *)bxGetInt64sRW(array);
+    case bxUINT8_CLASS:   return (void *)bxGetUInt8sRW(array);
+    case bxUINT16_CLASS:  return (void *)bxGetUInt16sRW(array);
+    case bxUINT32_CLASS:  return (void *)bxGetUInt32sRW(array);
+    case bxUINT64_CLASS:  return (void *)bxGetUInt64sRW(array);
+    case bxLOGICAL_CLASS: return (void *)bxGetLogicalsRW(array);
+    default:              return NULL;
+    }
+}
+
+/*
  * Inject a variable into the base workspace from a base64 column-major payload.
- * Supports float64 (double) and bool (logical) real matrices. Data is bounded by
- * the request line size, so this is for modest arrays, not huge datasets.
+ * Supports real numeric (int8..uint64, float32/64), complex (float32/64) and
+ * logical matrices. The bytes are copied straight into the array (they already
+ * match the column-major, little-endian, interleaved-complex layout).
  */
 static void mcp_handle_set_variable(mcp_socket_t client_fd, const mcp_request_t *request) {
     baSize rows = request->dims[0];
@@ -1479,7 +1545,10 @@ static void mcp_handle_set_variable(mcp_socket_t client_fd, const mcp_request_t 
     unsigned char *raw = NULL;
     size_t raw_cap;
     size_t raw_len;
+    size_t item_size = 0;
+    int is_bool = 0;
     bxArray *array = NULL;
+    void *dst;
 
     if (!mcp_is_valid_variable_name(request->name)) {
         mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_BAD_REQUEST, "Invalid variable name.");
@@ -1499,45 +1568,31 @@ static void mcp_handle_set_variable(mcp_socket_t client_fd, const mcp_request_t 
     }
     raw_len = mcp_base64_decode(request->data_b64 ? request->data_b64 : "", raw, raw_cap);
 
-    if (strcmp(request->dtype, "float64") == 0) {
-        if (raw_len != (size_t)elements * sizeof(double)) {
-            free(raw);
-            mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_BAD_REQUEST, "set_variable data size does not match dims for float64.");
-            return;
-        }
-        array = bxCreateDoubleMatrix(rows, cols, bxREAL);
-        if (array != NULL) {
-            double *dst = bxGetDoublesRW(array);
-            if (dst != NULL && elements > 0) {
-                memcpy(dst, raw, raw_len);
-            }
-        }
-    } else if (strcmp(request->dtype, "bool") == 0) {
-        if (raw_len != (size_t)elements) {
-            free(raw);
-            mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_BAD_REQUEST, "set_variable data size does not match dims for bool.");
-            return;
-        }
-        array = bxCreateLogicalMatrix(rows, cols);
-        if (array != NULL) {
-            bool *dst = bxGetLogicalsRW(array);
-            if (dst != NULL) {
-                for (baSize i = 0; i < elements; ++i) {
-                    dst[i] = raw[i] != 0;
-                }
-            }
-        }
-    } else {
+    array = mcp_create_typed_matrix(request->dtype, rows, cols, &item_size, &is_bool);
+    if (array == NULL) {
         free(raw);
-        mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_BAD_REQUEST, "set_variable supports only float64 and bool.");
+        mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_BAD_REQUEST, "set_variable: unsupported dtype.");
+        return;
+    }
+    if (raw_len != (size_t)elements * item_size) {
+        bxDestroyArray(array);
+        free(raw);
+        mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_BAD_REQUEST, "set_variable data size does not match dims/dtype.");
         return;
     }
 
-    free(raw);
-    if (array == NULL) {
-        mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_VARIABLE, "Failed to create variable array.");
-        return;
+    dst = mcp_writable_data(array);
+    if (dst != NULL && elements > 0) {
+        if (is_bool) {
+            bool *logical_dst = (bool *)dst;
+            for (baSize i = 0; i < elements; ++i) {
+                logical_dst[i] = raw[i] != 0;
+            }
+        } else {
+            memcpy(dst, raw, raw_len);
+        }
     }
+    free(raw);
 
     if (bxAddVariable(request->name, array, bxOVERWRITE) == 1) {
         /* Ownership transferred on success; do not destroy the array. */
@@ -1670,15 +1725,25 @@ static void mcp_handle_request(mcp_socket_t client_fd, const mcp_request_t *requ
 }
 
 static void mcp_handle_client(mcp_socket_t client_fd, volatile int *stop_server, int port) {
-    char line[BALTAMATICA_MCP_MAX_LINE];
+    /* The line buffer can be large (multi-MB set_variable payloads), so it is
+     * heap-allocated instead of sitting on the worker-thread stack. */
+    char *line = (char *)malloc(BALTAMATICA_MCP_MAX_LINE);
+    mcp_reader_t reader;
+
+    if (line == NULL) {
+        mcp_send_error(client_fd, "", BALTAMATICA_MCP_ERROR_INTERNAL, "Out of memory for request buffer.");
+        return;
+    }
+    mcp_reader_init(&reader, client_fd);
+
     while (!*stop_server) {
-        int status = mcp_recv_line(client_fd, line, sizeof(line));
+        int status = mcp_reader_getline(&reader, line, BALTAMATICA_MCP_MAX_LINE);
         if (status == 0) {
-            return;
+            break;
         }
         if (status < 0) {
             mcp_send_error(client_fd, "", BALTAMATICA_MCP_ERROR_BAD_REQUEST, "Request line too long.");
-            return;
+            break;
         }
 
         {
@@ -1695,6 +1760,8 @@ static void mcp_handle_client(mcp_socket_t client_fd, volatile int *stop_server,
             free(request.data_b64);
         }
     }
+
+    free(line);
 }
 
 static int mcp_open_server_socket(int port, mcp_socket_t *server_fd_out) {

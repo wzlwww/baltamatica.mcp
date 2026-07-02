@@ -192,3 +192,41 @@ def test_to_baltamatica_literal() -> None:
     assert to_baltamatica_literal([1, 2, 3]) == "[1.0  2.0  3.0]"
     assert to_baltamatica_literal(True) == "true"
     assert to_baltamatica_literal(5) == "5.0"
+
+
+def test_encode_for_set_integer_dtypes() -> None:
+    dtype, dims, raw = encode_for_set([[1, 2], [3, 4]], "int32")
+    assert dtype == "int32"
+    assert dims == [2, 2]
+    assert raw == struct.pack("<4i", 1, 3, 2, 4)  # column-major
+
+    dtype, dims, raw = encode_for_set([10, 20, 255], "uint8")
+    assert dtype == "uint8"
+    assert raw == bytes([10, 20, 255])
+
+
+def test_encode_for_set_integer_out_of_range() -> None:
+    with pytest.raises(ValueError):
+        encode_for_set([300], "uint8")
+
+
+def test_encode_for_set_complex_interleaves_column_major() -> None:
+    # 1x2 complex: (1+2i), (3+4i)
+    dtype, dims, raw = encode_for_set({"real": [1, 3], "imag": [2, 4]}, "complex128")
+    assert dtype == "complex128"
+    assert dims == [1, 2]
+    assert raw == struct.pack("<4d", 1.0, 2.0, 3.0, 4.0)  # re0,im0,re1,im1
+
+
+def test_encode_for_set_complex_requires_real_imag_same_shape() -> None:
+    with pytest.raises(ValueError):
+        encode_for_set({"real": [1, 2], "imag": [1]}, "complex128")
+    with pytest.raises(ValueError):
+        encode_for_set([1, 2], "complex128")  # not a {real, imag} dict
+
+
+def test_to_baltamatica_literal_with_dtype() -> None:
+    assert to_baltamatica_literal([[1, 2], [3, 4]], "int32") == "int32([1.0  2.0; 3.0  4.0])"
+    assert to_baltamatica_literal(
+        {"real": [1, 3], "imag": [2, 4]}, "complex128"
+    ) == "complex([1.0  3.0], [2.0  4.0])"

@@ -138,7 +138,7 @@ PYTHONPATH=src python -m baltamatica_mcp.bex_shutdown
 **已知限制**：
 
 - `get_variable`：数值/逻辑数组（实数**和复数**、任意大小）走 base64 二进制全保真回传；字符/字符串/结构体/元胞走结构化 JSON。极大的结构体/元胞会按上限截断（见 `truncated` 字段）；结构体/元胞里嵌套的数值目前是列主序扁平数组。
-- `set_variable`：目前支持 float64 和 bool、二维以内；受请求行大小限制（约 4500 个 double），暂不支持整数/复数类型和超大数据的流式接收。
+- `set_variable`：支持整数（`int8`..`uint64`）、浮点（`float32`/`float64`）、复数（`complex64`/`complex128`，`data={"real":...,"imag":...}`）和 `bool`，二维以内。请求走缓冲读取 + 堆分配缓冲区，单条请求上限约 16 MB（约 100 万个 double）。
 - 屏幕绘图可用（`figure`/`plot` 等会在 GUI 弹窗），但**图形导出到文件不可用**——遍查北太天元全部 3736 个文档函数，均无 `saveas`/`print`/`exportgraphics`/`getframe`/`imwrite` 等图形导出函数（这是北太天元本身的能力缺失）。替代方案：用 `get_variable` 取回绘图数据由 AI 端渲染，或用 `writematrix`/`writetable`/`save` 把数据导出成文件 + `BALTAMATICA_ARTIFACT=` 标记回传（见下）。
 - CLI 后端无需编译、跨平台，适合快速上手；BEX 后端功能更全（二进制传输、变量注入、输出捕获）。
 
@@ -280,7 +280,7 @@ baltamatica.mcp/
 | `run_script` | `file_path: string` | 运行 `.m` 脚本文件 | ✅ | ✅ `evalc` 捕获输出 |
 | `list_variables` | — | 列出工作区所有变量（名称、类型、维度） | ✅ `whos` 解析 | ✅ SDK 变量枚举 |
 | `get_variable` | `name: string` | 获取变量值 | ✅ `disp()` 文本 | ✅ 二进制全保真 + 结构化 JSON |
-| `set_variable` | `name: string, data` | 创建/覆盖工作区变量 | ✅ 字面量代码 | ✅ `bxAddVariable`（float64/bool） |
+| `set_variable` | `name, data, dtype?` | 创建/覆盖工作区变量 | ✅ 字面量代码 | ✅ `bxAddVariable`（整数/浮点/复数/bool） |
 | `clear_workspace` | — | 清空工作区状态 | ✅ | ✅ `clear` |
 
 ### 文件产物反馈
@@ -331,9 +331,10 @@ fprintf('BALTAMATICA_ARTIFACT=/tmp/plot.png\n');
 - [x] 自动化 BEX 集成测试（`bex` 编译校验 + 运行中桥接往返，标记 `integration`）
 - [x] 发布体验：`baltamatica-mcp` 控制台入口、项目 URL、`set_variable` 工具与文档
 
+- [x] BEX `set_variable` 扩展：整数（int8..uint64）/浮点（float32/64）/复数（complex64/128）类型 + 缓冲读取大 payload（上限约 16 MB）
+
 ### 下一步
 
-- [ ] BEX `set_variable` 扩展：整数/复数类型、大数据流式接收（当前 float64/bool、受请求行大小限制）
 - [ ] BEX 图形导出到文件：受限于北太天元本身缺少 `saveas`/`print`/`exportgraphics` 等函数，需厂商侧支持
 - [ ] 打包发布到 PyPI，提供预编译的 BEX 二进制
 

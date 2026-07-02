@@ -49,6 +49,9 @@ def test_bex_bridge_implements_sdk_entrypoint_and_minimal_methods() -> None:
     assert "mcp_base64_decode" in source
     assert "mcp_eval_capture" in source
     assert '"evalc"' in source
+    assert "mcp_create_typed_matrix" in source
+    assert "bxCreateNumericMatrix" in source
+    assert "mcp_reader_getline" in source
     assert "mcp_send_shutdown_request" in source
     assert "mcp_set_close_on_exec(server_fd)" in source
     assert "mcp_array_is_background_command" in source

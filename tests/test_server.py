@@ -42,8 +42,8 @@ class FakeEngine:
         self.requested_variables.append(name)
         return ExecutionResult(success=True, output=f"value: {name}")
 
-    async def set_variable(self, name: str, data: object) -> ExecutionResult:
-        self.set_variables.append((name, data))
+    async def set_variable(self, name: str, data: object, dtype: str | None = None) -> ExecutionResult:
+        self.set_variables.append((name, data, dtype))
         return ExecutionResult(success=True, output=f"set: {name}")
 
 

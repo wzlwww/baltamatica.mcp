@@ -95,23 +95,76 @@ def present_binary_value(value: dict[str, Any], *, name: str) -> tuple[dict[str,
     return presented, [artifact]
 
 
-def encode_for_set(data: Any) -> tuple[str, list[int], bytes]:
+# numpy-style dtype -> struct code for the scalar component.
+_SET_INT_CODES = {
+    "int8": "b", "int16": "h", "int32": "i", "int64": "q",
+    "uint8": "B", "uint16": "H", "uint32": "I", "uint64": "Q",
+}
+# dtype -> Baltamatica cast function for the CLI backend (double needs none).
+_CLI_CAST = {
+    "int8": "int8", "int16": "int16", "int32": "int32", "int64": "int64",
+    "uint8": "uint8", "uint16": "uint16", "uint32": "uint32", "uint64": "uint64",
+    "float32": "single", "bool": "logical",
+}
+
+
+def encode_for_set(data: Any, dtype: str | None = None) -> tuple[str, list[int], bytes]:
     """Normalize Python data into (dtype, [rows, cols], column-major bytes).
 
-    Accepts a scalar, a 1-D list (row vector), or a 2-D nested list (matrix).
-    Booleans become ``bool`` (logical); all other numbers become ``float64``.
+    ``data`` is a scalar, a 1-D list (row vector), or a 2-D nested list (matrix).
+    Without ``dtype``, booleans become ``bool`` and other numbers ``float64``.
+    ``dtype`` may request ``int8``..``uint64``, ``float32``/``float64``, or
+    ``complex64``/``complex128`` (with ``data={'real': ..., 'imag': ...}``).
     """
 
-    dtype, dims, flat = _normalize_for_set(data)
-    if dtype == "bool":
-        raw = bytes(1 if v else 0 for v in flat)
-    else:
-        raw = struct.pack("<%dd" % len(flat), *(float(v) for v in flat))
-    return dtype, dims, raw
+    if dtype in ("complex64", "complex128"):
+        return _encode_complex(data, dtype)
+
+    inferred, dims, flat = _normalize_for_set(data)
+    target = dtype or inferred
+
+    if target == "bool":
+        return "bool", dims, bytes(1 if v else 0 for v in flat)
+    if target == "float64":
+        return "float64", dims, struct.pack("<%dd" % len(flat), *(float(v) for v in flat))
+    if target == "float32":
+        return "float32", dims, struct.pack("<%df" % len(flat), *(float(v) for v in flat))
+    if target in _SET_INT_CODES:
+        code = _SET_INT_CODES[target]
+        try:
+            return target, dims, struct.pack("<%d%s" % (len(flat), code), *(int(v) for v in flat))
+        except struct.error as exc:
+            raise ValueError(f"set_variable: value out of range for {target}: {exc}") from exc
+    raise ValueError(f"set_variable: unsupported dtype {dtype!r}")
 
 
-def to_baltamatica_literal(data: Any) -> str:
-    """Render data as a Baltamatica matrix literal for the CLI backend."""
+def _encode_complex(data: Any, dtype: str) -> tuple[str, list[int], bytes]:
+    if not isinstance(data, dict) or "real" not in data or "imag" not in data:
+        raise ValueError("set_variable complex requires data={'real': <array>, 'imag': <array>}")
+    _, dims_r, flat_r = _normalize_for_set(data["real"])
+    _, dims_i, flat_i = _normalize_for_set(data["imag"])
+    if dims_r != dims_i:
+        raise ValueError("set_variable complex: real and imag must have the same shape")
+    code = "d" if dtype == "complex128" else "f"
+    interleaved: list[float] = []
+    for re_val, im_val in zip(flat_r, flat_i):
+        interleaved.append(float(re_val))
+        interleaved.append(float(im_val))
+    return dtype, dims_r, struct.pack("<%d%s" % (len(interleaved), code), *interleaved)
+
+
+def to_baltamatica_literal(data: Any, dtype: str | None = None) -> str:
+    """Render data as a Baltamatica expression for the CLI backend."""
+    if dtype in ("complex64", "complex128"):
+        if not isinstance(data, dict) or "real" not in data or "imag" not in data:
+            raise ValueError("set_variable complex requires data={'real': ..., 'imag': ...}")
+        return f"complex({_real_literal(data['real'])}, {_real_literal(data['imag'])})"
+    literal = _real_literal(data)
+    cast = _CLI_CAST.get(dtype) if dtype else None
+    return f"{cast}({literal})" if cast else literal
+
+
+def _real_literal(data: Any) -> str:
     if isinstance(data, bool):
         return "true" if data else "false"
     if isinstance(data, (int, float)):

@@ -212,8 +212,11 @@ Presented value (Python → model) for a small array:
 ### `set_variable`
 
 Create or overwrite a variable in the base workspace from a base64 column-major
-payload. Supports `float64` (double) and `bool` (logical) real matrices. The
-payload is bounded by the request line size, so this is for modest arrays.
+payload. `dtype` may be `int8`..`uint64`, `float32`/`float64`, `complex64`/
+`complex128`, or `bool`. Complex payloads carry interleaved re,im components (the
+Python client builds them from `data={"real": ..., "imag": ...}`). The bridge
+reads requests through a buffered reader into a heap buffer, so large payloads
+(up to ~16 MB per request) are supported.
 
 Request:
 

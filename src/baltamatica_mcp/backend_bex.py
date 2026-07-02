@@ -25,6 +25,8 @@ from baltamatica_mcp.serializer import (
 DEFAULT_BEX_HOST = "127.0.0.1"
 DEFAULT_BEX_PORT = 31415
 DEFAULT_ARTIFACT_TYPE = "application/octet-stream"
+# Max bytes for a single response line (large binary get_variable payloads).
+_STREAM_LIMIT = 64 * 1024 * 1024
 
 
 class BexProtocolError(EngineError):
@@ -72,13 +74,13 @@ class BexEngine:
         response = await self._request("clear_workspace", {})
         return _execution_result_from_response(response)
 
-    async def set_variable(self, name: str, data: Any) -> ExecutionResult:
-        dtype, dims, raw = encode_for_set(data)
+    async def set_variable(self, name: str, data: Any, dtype: str | None = None) -> ExecutionResult:
+        resolved_dtype, dims, raw = encode_for_set(data, dtype)
         response = await self._request(
             "set_variable",
             {
                 "name": name,
-                "dtype": dtype,
+                "dtype": resolved_dtype,
                 "dims": dims,
                 "data_b64": base64.b64encode(raw).decode("ascii"),
             },
@@ -181,7 +183,10 @@ class BexEngine:
         await self.close()
         try:
             self._reader, self._writer = await asyncio.wait_for(
-                asyncio.open_connection(self.host, self.port),
+                # A large stream limit so big get_variable responses (base64 of a
+                # large matrix) fit in a single readline() instead of raising
+                # LimitOverrunError at the 64 KB default.
+                asyncio.open_connection(self.host, self.port, limit=_STREAM_LIMIT),
                 timeout=self.timeout,
             )
         except asyncio.TimeoutError as exc:
