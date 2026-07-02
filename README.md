@@ -130,8 +130,12 @@ PYTHONPATH=src python -m baltamatica_mcp.bex_shutdown
 
 - `get_variable` 已支持:数值/逻辑数组(实数**和复数**、任意大小)走 base64 二进制全保真回传;字符/字符串/结构体/元胞走结构化 JSON。极大的结构体/元胞会按上限截断(见 `truncated` 字段);结构体/元胞里嵌套的数值目前是列主序扁平数组。
 - `execute_code` 暂不捕获控制台输出（计算结果请用 `get_variable` 取回）。
-- 屏幕绘图可用（`figure`/`plot` 等会在 GUI 弹窗），但**图形导出到文件不可用**——当前北太天元未提供 `saveas`/`print`/`exportgraphics` 等函数；要回传图像需走数据侧（`BALTAMATICA_ARTIFACT` + CSV）或后续的绘图探针。
+- 屏幕绘图可用（`figure`/`plot` 等会在 GUI 弹窗），但**图形导出到文件不可用**——遍查北太天元全部 3736 个文档函数,均无 `saveas`/`print`/`exportgraphics`/`getframe`/`imwrite` 等图形导出函数(这是北太天元本身的能力缺失)。替代方案:用 `get_variable` 取回绘图数据由 AI 端渲染,或用 `writematrix`/`writetable`/`save` 把数据导出成文件 + `BALTAMATICA_ARTIFACT=` 标记回传(见下)。
 - 日常稳定试用仍可优先使用 CLI 后端。
+
+**文件产物反馈(BEX 也支持)**:`execute_code` / `run_script` 现在捕获控制台输出,脚本用
+`fprintf('BALTAMATICA_ARTIFACT=text/csv:/tmp/x.csv\n')` 声明的文件会被解析进返回的
+`artifacts` 列表(路径、MIME、是否存在、大小)。
 
 ### 在 Claude Desktop 中配置
 
@@ -304,10 +308,14 @@ fprintf('BALTAMATICA_ARTIFACT=/tmp/plot.png\n');
 - [x] BEX `set_variable`：从标量/向量/矩阵注入工作区变量（`bxAddVariable`）
 
 - [x] BEX `execute_code` 控制台输出捕获（`evalc` + `try/catch`，成功返回 stdout、失败返回错误信息）
+- [x] BEX 文件产物反馈：从捕获输出解析 `BALTAMATICA_ARTIFACT=` 标记（`run_script` 也捕获输出）
+- [x] 绘图导出调研：确认北太天元无任何图形导出函数（3736 个函数全查），改走数据侧回传
 
 ### 下一步
 
 - [ ] BEX `set_variable` 扩展：整数/复数类型、大数据流式接收（当前 float64/bool、受请求行大小限制）
+- [ ] `background` 模式跨线程调用解释器的线程安全评估（Phase 6）
+- [ ] 自动化 BEX 集成测试 + 发布体验（Phase 7）
 - [ ] BEX 图形导出到文件：北太天元缺 `saveas`/`print`/`exportgraphics`，需绘图探针（`bex/bex_plot_probe.c`）或原生导出路径
 - [ ] `background` 模式跨线程调用解释器的线程安全评估
 - [ ] 发布与安装体验完善（PR9：安装说明、故障排查、PyPI 元数据、BEX 二进制发布）

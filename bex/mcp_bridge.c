@@ -1575,10 +1575,16 @@ static void mcp_handle_request(mcp_socket_t client_fd, const mcp_request_t *requ
     if (strcmp(request->method, BALTAMATICA_MCP_METHOD_RUN_SCRIPT) == 0) {
         char escaped[BALTAMATICA_MCP_MAX_PATH * 2];
         char command[BALTAMATICA_MCP_MAX_PATH * 2 + 16];
+        char captured[MCP_MAX_OUTPUT];
+        int is_error = 0;
+        int status;
         mcp_escape_baltamatica_string(request->file_path, escaped, sizeof(escaped));
-        snprintf(command, sizeof(command), "run('%s');", escaped);
-        if (mcp_eval_command(command) == 0) {
-            mcp_send_success(client_fd, request->id, "");
+        snprintf(command, sizeof(command), "run('%s')", escaped);
+        status = mcp_eval_capture(command, captured, sizeof(captured), &is_error);
+        if (status == 0) {
+            mcp_send_success(client_fd, request->id, captured);
+        } else if (is_error && captured[0] != '\0') {
+            mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_SCRIPT, captured);
         } else {
             mcp_send_error(
                 client_fd,

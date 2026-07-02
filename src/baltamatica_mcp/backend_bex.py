@@ -62,11 +62,11 @@ class BexEngine:
 
     async def execute_code(self, code: str) -> ExecutionResult:
         response = await self._request("execute_code", {"code": code})
-        return _execution_result_from_response(response)
+        return _with_output_artifacts(_execution_result_from_response(response))
 
     async def run_script(self, file_path: str) -> ExecutionResult:
         response = await self._request("run_script", {"file_path": file_path})
-        return _execution_result_from_response(response)
+        return _with_output_artifacts(_execution_result_from_response(response))
 
     async def clear_workspace(self) -> ExecutionResult:
         response = await self._request("clear_workspace", {})
@@ -205,6 +205,25 @@ class BexEngine:
     def _next_request_id(self) -> str:
         self._request_counter += 1
         return str(self._request_counter)
+
+
+def _with_output_artifacts(result: ExecutionResult) -> ExecutionResult:
+    """Merge BALTAMATICA_ARTIFACT markers found in captured output into artifacts.
+
+    Baltamatica cannot export figures to files, but data-export functions
+    (writematrix, writetable, save, ...) can, and a script/command can announce
+    the resulting file with a BALTAMATICA_ARTIFACT line. Since execute_code and
+    run_script now capture console output, those markers are reported here too.
+    """
+
+    from baltamatica_mcp.backend_cli import parse_artifacts
+
+    if not result.output:
+        return result
+    marker_artifacts = parse_artifacts(result.output)
+    if not marker_artifacts:
+        return result
+    return replace(result, artifacts=(result.artifacts or []) + marker_artifacts)
 
 
 def _execution_result_from_response(response: dict[str, Any]) -> ExecutionResult:

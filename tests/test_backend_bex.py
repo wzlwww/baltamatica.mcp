@@ -242,6 +242,32 @@ def test_get_variable_preserves_structured_value_payload() -> None:
     assert requests == [{"id": "1", "method": "get_variable", "params": {"name": "A"}}]
 
 
+def test_execute_code_parses_artifact_markers_from_output(tmp_path) -> None:
+    artifact_file = tmp_path / "wave.csv"
+    artifact_file.write_text("t,x\n0,0\n")
+    marker = f"BALTAMATICA_ARTIFACT=text/csv:{artifact_file}"
+
+    async def exercise():
+        server, requests, port = await start_mock_bex_server(
+            lambda request, _: response_for(request, output=f"wrote file\n{marker}\n")
+        )
+        engine = BexEngine(port=port, timeout=1)
+        try:
+            result = await engine.execute_code("writematrix(M, 'wave.csv')")
+        finally:
+            await engine.close()
+            await close_server(server)
+        return result
+
+    result = run(exercise())
+
+    assert result.success is True
+    assert len(result.artifacts) == 1
+    assert result.artifacts[0].type == "text/csv"
+    assert result.artifacts[0].exists is True
+    assert result.artifacts[0].size > 0
+
+
 def test_set_variable_sends_binary_column_major_request() -> None:
     import base64
     import struct
