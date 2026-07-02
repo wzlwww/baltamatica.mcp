@@ -42,9 +42,20 @@ command it wraps):
 
 ```bash
 scripts/build_bex.sh
-# equivalent to, from the bex/ directory:
-#   <baltamatica-dir>/bex mcp_bridge.c
 ```
+
+The script first tries the standalone `bex` compiler, then falls back to the
+in-interpreter `bex()` function:
+
+```bash
+baltamatica -nodesktop -s "cd('<repo>/bex'); bex('mcp_bridge.c')"
+```
+
+The fallback is required on some Linux builds (e.g. Ubuntu 24.04) where the
+standalone `bex` binary crashes at startup (`std::system_error` during glibc
+`rseq` init) even though the interpreter itself runs fine headless. Run the
+interpreter headless with `QT_QPA_PLATFORM=offscreen` and Baltamatica's `lib`
+directory on `LD_LIBRARY_PATH` (the `baltamatica.sh` launcher sets this up).
 
 This produces the platform artifact:
 
