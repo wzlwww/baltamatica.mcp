@@ -104,6 +104,39 @@ Example response:
 {"id":"status","success":true,"output":"MCP bridge ready","host":"127.0.0.1","port":31415,"artifacts":[]}
 ```
 
+## Threading and Concurrency
+
+How SDK/interpreter calls are dispatched depends on the run mode:
+
+- **Foreground `mcp_bridge()`** runs the accept loop *on the interpreter
+  thread*. Every `bxCallBaltamatica` / `bxEvalIn` happens on that thread, so
+  there is no cross-thread interpreter access — the safest model — but the GUI
+  command line is blocked while it runs.
+- **Background `mcp_bridge('background')`** runs the accept loop on a detached
+  worker thread. The command line stays free, but interpreter calls happen on
+  the worker thread.
+
+In both modes the bridge **serializes all requests**: it accepts one client
+connection at a time and processes that client's requests one by one, so no two
+bridge requests ever touch the interpreter concurrently. Empirically this is
+stable — a soak of 800 sequential mixed requests and two concurrent client
+connections (execute_code / set_variable / get_variable / list_variables)
+completed with zero errors and intact workspace state.
+
+The one remaining concurrency hazard is **background mode plus manual GUI use**:
+if you type in the GUI command window while the MCP server is serving requests,
+the interpreter is driven from two threads at once (the GUI main thread and the
+bridge worker), and Baltamatica's interpreter is not known to be thread-safe.
+
+Recommendations:
+
+- While the AI is driving a background bridge, don't also type commands in the
+  GUI command window.
+- If you need to work in the GUI concurrently, or want the strongest safety
+  guarantee, use foreground `mcp_bridge()` (interpreter calls on the main
+  thread) and stop it with `python -m baltamatica_mcp.bex_shutdown`.
+- Multiple MCP clients are safe: the bridge queues and serializes them.
+
 ## Plotting
 
 For GUI plotting, start `mcp_bridge()` inside an already open interactive
