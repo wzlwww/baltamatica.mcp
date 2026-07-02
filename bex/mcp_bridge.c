@@ -744,11 +744,13 @@ static int mcp_eval_capture(const char *code, char *captured, size_t captured_si
     if (wrapped == NULL) {
         return 1;
     }
-    /* clear of a never-created variable is silent, so cleanup is unconditional. */
+    /* Statements are newline-separated (not ';'-separated) so an unsuppressed
+     * statement like "x = 40" still auto-displays "x = 40" for capture. clear of
+     * a never-created variable is silent, so cleanup is unconditional. */
     snprintf(
         wrapped,
         wrapped_size,
-        "try; %s; catch mcp_err__; fprintf('" MCP_ERR_MARKER "%%s', mcp_err__); end; clear mcp_err__",
+        "try\n%s\ncatch mcp_err__\nfprintf('" MCP_ERR_MARKER "%%s', mcp_err__);\nend\nclear mcp_err__",
         code);
 
     args[0] = bxCreateString(wrapped);
