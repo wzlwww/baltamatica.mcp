@@ -209,6 +209,31 @@ Presented value (Python → model) for a small array:
 }
 ```
 
+### `set_variable`
+
+Create or overwrite a variable in the base workspace from a base64 column-major
+payload. Supports `float64` (double) and `bool` (logical) real matrices. The
+payload is bounded by the request line size, so this is for modest arrays.
+
+Request:
+
+```json
+{
+  "id": "7",
+  "method": "set_variable",
+  "params": {
+    "name": "A",
+    "dtype": "float64",
+    "dims": [2, 2],
+    "data_b64": "AAAAAAAA8D8AAAAAAAAIQAAAAAAAAABAAAAAAAAAEEA="
+  }
+}
+```
+
+`data_b64` holds the exact little-endian column-major bytes for `dims` = `[rows,
+cols]`. The Python client builds this from a scalar, 1-D list (row vector), or
+2-D nested list. Response is a normal success/error result with empty `output`.
+
 ## Artifact Schema
 
 Commands can report generated files with the same normalized shape used by the

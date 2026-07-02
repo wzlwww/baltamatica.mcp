@@ -103,6 +103,9 @@ class BaltamaticaEngine(Protocol):
     async def get_variable(self, name: str) -> ExecutionResult:
         """Get a display representation of one variable."""
 
+    async def set_variable(self, name: str, data: Any) -> ExecutionResult:
+        """Create or overwrite a workspace variable from Python data."""
+
 
 class UnimplementedEngine:
     """Placeholder backend used until CLI and BEX engines land in later PRs."""
@@ -135,6 +138,12 @@ class UnimplementedEngine:
         )
 
     async def get_variable(self, name: str) -> ExecutionResult:
+        raise EngineUnavailableError(
+            f"Baltamatica backend '{self.backend}' is not implemented yet. "
+            "The MCP server skeleton is ready; install a backend implementation next."
+        )
+
+    async def set_variable(self, name: str, data: Any) -> ExecutionResult:
         raise EngineUnavailableError(
             f"Baltamatica backend '{self.backend}' is not implemented yet. "
             "The MCP server skeleton is ready; install a backend implementation next."

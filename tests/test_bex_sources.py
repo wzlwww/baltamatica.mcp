@@ -43,6 +43,10 @@ def test_bex_bridge_implements_sdk_entrypoint_and_minimal_methods() -> None:
     assert "mcp_append_value(" in source
     assert "bxGetFieldByNumberRO" in source
     assert "bxGetCellRO" in source
+    assert "mcp_handle_set_variable" in source
+    assert "bxAddVariable(request->name" in source
+    assert "BALTAMATICA_MCP_METHOD_SET_VARIABLE" in source
+    assert "mcp_base64_decode" in source
     assert "mcp_send_shutdown_request" in source
     assert "mcp_set_close_on_exec(server_fd)" in source
     assert "mcp_array_is_background_command" in source

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from mcp.server.fastmcp import FastMCP
 
@@ -120,6 +120,26 @@ def create_mcp_server(engine: BaltamaticaEngine | None = None) -> FastMCP:
 
         try:
             result = await selected_engine.get_variable(name.strip())
+        except Exception as exc:
+            return _error_response(exc, selected_engine.backend)
+        return _success_response(result, selected_engine.backend)
+
+    @mcp.tool()
+    async def set_variable(name: str, data: Any) -> dict[str, object]:
+        """Create or overwrite a workspace variable.
+
+        `data` may be a number, a boolean, a 1-D list (row vector), or a 2-D
+        nested list (matrix). Numbers become double, booleans become logical.
+        """
+
+        if not name.strip():
+            return _error_response(
+                ValueError("Variable name cannot be empty."),
+                selected_engine.backend,
+            )
+
+        try:
+            result = await selected_engine.set_variable(name.strip(), data)
         except Exception as exc:
             return _error_response(exc, selected_engine.backend)
         return _success_response(result, selected_engine.backend)

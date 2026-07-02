@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from dataclasses import replace
 from typing import Any
@@ -15,7 +16,11 @@ from baltamatica_mcp.engine import (
     VariableInfo,
     VariableListResult,
 )
-from baltamatica_mcp.serializer import present_binary_value, present_structured
+from baltamatica_mcp.serializer import (
+    encode_for_set,
+    present_binary_value,
+    present_structured,
+)
 
 DEFAULT_BEX_HOST = "127.0.0.1"
 DEFAULT_BEX_PORT = 31415
@@ -65,6 +70,19 @@ class BexEngine:
 
     async def clear_workspace(self) -> ExecutionResult:
         response = await self._request("clear_workspace", {})
+        return _execution_result_from_response(response)
+
+    async def set_variable(self, name: str, data: Any) -> ExecutionResult:
+        dtype, dims, raw = encode_for_set(data)
+        response = await self._request(
+            "set_variable",
+            {
+                "name": name,
+                "dtype": dtype,
+                "dims": dims,
+                "data_b64": base64.b64encode(raw).decode("ascii"),
+            },
+        )
         return _execution_result_from_response(response)
 
     async def list_variables(self) -> VariableListResult:

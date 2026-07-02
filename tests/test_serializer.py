@@ -7,8 +7,10 @@ import pytest
 
 from baltamatica_mcp.serializer import (
     MAX_INLINE_ELEMENTS,
+    encode_for_set,
     present_binary_value,
     present_structured,
+    to_baltamatica_literal,
 )
 
 
@@ -143,10 +145,50 @@ def test_present_structured_reshapes_nested_numeric_in_cell() -> None:
 
 
 def test_present_structured_reshapes_struct_fields() -> None:
-    struct = {
+    struct_node = {
         "type": "struct",
         "fields": ["xy"],
         "data": [{"xy": {"type": "numeric_array", "dims": [2, 2], "data": [1, 3, 2, 4]}}],
     }
-    out = present_structured(struct)
+    out = present_structured(struct_node)
     assert out["data"][0]["xy"]["data"] == [[1, 2], [3, 4]]
+
+
+def test_encode_for_set_scalar_and_bool() -> None:
+    assert encode_for_set(3.5) == ("float64", [1, 1], struct.pack("<d", 3.5))
+    assert encode_for_set(True) == ("bool", [1, 1], b"\x01")
+
+
+def test_encode_for_set_row_vector() -> None:
+    dtype, dims, raw = encode_for_set([1, 2, 3])
+    assert dtype == "float64"
+    assert dims == [1, 3]
+    assert raw == struct.pack("<3d", 1.0, 2.0, 3.0)
+
+
+def test_encode_for_set_matrix_is_column_major() -> None:
+    dtype, dims, raw = encode_for_set([[1, 2], [3, 4]])
+    assert dtype == "float64"
+    assert dims == [2, 2]
+    assert raw == struct.pack("<4d", 1.0, 3.0, 2.0, 4.0)
+
+
+def test_encode_for_set_bool_matrix() -> None:
+    dtype, dims, raw = encode_for_set([[True, False, True]])
+    assert dtype == "bool"
+    assert dims == [1, 3]
+    assert raw == bytes([1, 0, 1])
+
+
+def test_encode_for_set_rejects_ragged_and_non_numeric() -> None:
+    with pytest.raises(ValueError):
+        encode_for_set([[1, 2], [3]])
+    with pytest.raises(ValueError):
+        encode_for_set(["a", "b"])
+
+
+def test_to_baltamatica_literal() -> None:
+    assert to_baltamatica_literal([[1, 2], [3, 4]]) == "[1.0  2.0; 3.0  4.0]"
+    assert to_baltamatica_literal([1, 2, 3]) == "[1.0  2.0  3.0]"
+    assert to_baltamatica_literal(True) == "true"
+    assert to_baltamatica_literal(5) == "5.0"

@@ -16,6 +16,7 @@ class FakeEngine:
         self.cleared = False
         self.listed = False
         self.requested_variables: list[str] = []
+        self.set_variables: list[tuple[str, object]] = []
 
     async def execute_code(self, code: str) -> ExecutionResult:
         self.executed_code.append(code)
@@ -41,6 +42,10 @@ class FakeEngine:
         self.requested_variables.append(name)
         return ExecutionResult(success=True, output=f"value: {name}")
 
+    async def set_variable(self, name: str, data: object) -> ExecutionResult:
+        self.set_variables.append((name, data))
+        return ExecutionResult(success=True, output=f"set: {name}")
+
 
 async def _call_tool_result(server, name: str, arguments: dict[str, object]) -> dict[str, object]:
     _, structured_result = await server.call_tool(name, arguments)
@@ -62,6 +67,7 @@ def test_server_registers_tools() -> None:
         "get_variable",
         "list_variables",
         "run_script",
+        "set_variable",
     }
 
 

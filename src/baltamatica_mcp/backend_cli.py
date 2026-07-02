@@ -82,6 +82,11 @@ class CliEngine:
             self.state_file.unlink()
         return await self._execute_command("clear")
 
+    async def set_variable(self, name: str, data: object) -> ExecutionResult:
+        from baltamatica_mcp.serializer import to_baltamatica_literal
+
+        return await self.execute_code(f"{name} = {to_baltamatica_literal(data)};")
+
     async def list_variables(self) -> VariableListResult:
         result = await self._execute_command(self._wrap_readonly_code("whos"))
         if not result.success:

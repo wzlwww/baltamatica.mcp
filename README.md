@@ -257,7 +257,8 @@ baltamatica.mcp/
 | `execute_code` | `code: string` | 执行代码并返回控制台输出 | ✅ | ✅ 最小桥接 |
 | `run_script` | `file_path: string` | 运行 `.m` 脚本文件 | ✅ | ✅ 最小桥接 |
 | `list_variables` | — | 列出工作区所有变量（名称、类型、维度） | ✅ `whos` 解析 | ✅ SDK 变量枚举 |
-| `get_variable` | `name: string` | 获取变量显示值 | ✅ `disp()` 文本 | ✅ 文本 + 小数组结构化 JSON |
+| `get_variable` | `name: string` | 获取变量值 | ✅ `disp()` 文本 | ✅ 二进制全保真 + 结构化 JSON |
+| `set_variable` | `name: string, data` | 创建/覆盖工作区变量 | ✅ 字面量代码 | ✅ `bxAddVariable`(float64/bool) |
 | `clear_workspace` | — | 清空工作区状态 | ✅ | ✅ 最小桥接 |
 
 ### 文件产物反馈
@@ -299,10 +300,12 @@ fprintf('BALTAMATICA_ARTIFACT=/tmp/plot.png\n');
 - [x] BEX 小型实数数值/逻辑数组结构化 JSON 读取
 - [x] BEX 生命周期健壮化：可靠 `stop` / Ctrl-C 恢复 / 自愈重绑 / `background` 模式 / 状态返回值
 - [x] BEX `get_variable` 存在性预检查（避免不存在变量在 GUI 里回显 `evalin` 错误）
+- [x] BEX 数值/逻辑二进制全保真传输（含复数）+ 字符/字符串/结构体/元胞结构化序列化
+- [x] BEX `set_variable`：从标量/向量/矩阵注入工作区变量（`bxAddVariable`）
 
 ### 下一步
 
-- [ ] BEX 大矩阵二进制传输，复数/字符/结构体/元胞的结构化序列化（目前仅文本 + 小实数/逻辑）
+- [ ] BEX `set_variable` 扩展：整数/复数类型、大数据流式接收（当前 float64/bool、受请求行大小限制）
 - [ ] BEX `execute_code` 控制台输出捕获（当前仅返回成功/错误，不含 stdout）
 - [ ] BEX 图形导出到文件：北太天元缺 `saveas`/`print`/`exportgraphics`，需绘图探针（`bex/bex_plot_probe.c`）或原生导出路径
 - [ ] `background` 模式跨线程调用解释器的线程安全评估

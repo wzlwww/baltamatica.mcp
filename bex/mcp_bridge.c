@@ -74,6 +74,10 @@ typedef struct mcp_request_t {
     char code[BALTAMATICA_MCP_MAX_CODE];
     char file_path[BALTAMATICA_MCP_MAX_PATH];
     char name[BALTAMATICA_MCP_MAX_METHOD];
+    char dtype[32];         /* set_variable: numpy-style dtype */
+    baSize dims[2];         /* set_variable: [rows, cols] */
+    int ndims;              /* set_variable: number of dims parsed */
+    char *data_b64;         /* set_variable: heap-owned base64 payload */
 } mcp_request_t;
 
 /*
@@ -385,6 +389,53 @@ static int mcp_json_get_string(const char *json, const char *key, char *out, siz
     return mcp_read_json_string(cursor, out, out_size);
 }
 
+/* Parse a JSON integer array like "dims":[2,3] into out; returns element count. */
+static int mcp_json_get_int_array(const char *json, const char *key, baSize *out, int max_out) {
+    char pattern[128];
+    const char *cursor;
+    int count = 0;
+    if (snprintf(pattern, sizeof(pattern), "\"%s\"", key) >= (int)sizeof(pattern)) {
+        return 0;
+    }
+    cursor = strstr(json, pattern);
+    if (!cursor) {
+        return 0;
+    }
+    cursor += strlen(pattern);
+    cursor = mcp_skip_ws(cursor);
+    if (*cursor != ':') {
+        return 0;
+    }
+    cursor = mcp_skip_ws(cursor + 1);
+    if (*cursor != '[') {
+        return 0;
+    }
+    ++cursor;
+    while (count < max_out) {
+        char *end;
+        long parsed;
+        cursor = mcp_skip_ws(cursor);
+        if (*cursor == ']') {
+            break;
+        }
+        parsed = strtol(cursor, &end, 10);
+        if (end == cursor) {
+            return 0;
+        }
+        out[count++] = (baSize)parsed;
+        cursor = mcp_skip_ws(end);
+        if (*cursor == ',') {
+            ++cursor;
+            continue;
+        }
+        if (*cursor == ']') {
+            break;
+        }
+        return 0;
+    }
+    return count;
+}
+
 static int mcp_parse_request(const char *line, mcp_request_t *request, char *error, size_t error_size) {
     memset(request, 0, sizeof(*request));
     if (!mcp_json_get_string(line, "id", request->id, sizeof(request->id))) {
@@ -408,6 +459,33 @@ static int mcp_parse_request(const char *line, mcp_request_t *request, char *err
     } else if (strcmp(request->method, BALTAMATICA_MCP_METHOD_GET_VARIABLE) == 0) {
         if (!mcp_json_get_string(line, "name", request->name, sizeof(request->name))) {
             snprintf(error, error_size, "get_variable requires params.name.");
+            return 0;
+        }
+    } else if (strcmp(request->method, BALTAMATICA_MCP_METHOD_SET_VARIABLE) == 0) {
+        size_t cap;
+        if (!mcp_json_get_string(line, "name", request->name, sizeof(request->name))) {
+            snprintf(error, error_size, "set_variable requires params.name.");
+            return 0;
+        }
+        if (!mcp_json_get_string(line, "dtype", request->dtype, sizeof(request->dtype))) {
+            snprintf(error, error_size, "set_variable requires params.dtype.");
+            return 0;
+        }
+        request->ndims = mcp_json_get_int_array(line, "dims", request->dims, 2);
+        if (request->ndims != 2) {
+            snprintf(error, error_size, "set_variable requires params.dims as [rows, cols].");
+            return 0;
+        }
+        cap = strlen(line) + 1;
+        request->data_b64 = (char *)malloc(cap);
+        if (request->data_b64 == NULL) {
+            snprintf(error, error_size, "Out of memory parsing set_variable.");
+            return 0;
+        }
+        if (!mcp_json_get_string(line, "data_b64", request->data_b64, cap)) {
+            free(request->data_b64);
+            request->data_b64 = NULL;
+            snprintf(error, error_size, "set_variable requires params.data_b64.");
             return 0;
         }
     }
@@ -469,6 +547,47 @@ static void mcp_stream_base64(mcp_socket_t client_fd, const unsigned char *data,
     if (out_index > 0) {
         mcp_send_all(client_fd, out, out_index);
     }
+}
+
+static int mcp_base64_char(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+/* Decode standard base64 (ignoring whitespace) into out; returns decoded length. */
+static size_t mcp_base64_decode(const char *in, unsigned char *out, size_t out_cap) {
+    int quad[4];
+    int qn = 0;
+    size_t written = 0;
+    for (const char *p = in; *p; ++p) {
+        int value;
+        if (*p == '=') {
+            break;
+        }
+        value = mcp_base64_char(*p);
+        if (value < 0) {
+            continue;  /* skip newlines / stray whitespace */
+        }
+        quad[qn++] = value;
+        if (qn == 4) {
+            if (written + 3 > out_cap) return written;
+            out[written++] = (unsigned char)((quad[0] << 2) | (quad[1] >> 4));
+            out[written++] = (unsigned char)(((quad[1] & 0xF) << 4) | (quad[2] >> 2));
+            out[written++] = (unsigned char)(((quad[2] & 0x3) << 6) | quad[3]);
+            qn = 0;
+        }
+    }
+    if (qn >= 2 && written < out_cap) {
+        out[written++] = (unsigned char)((quad[0] << 2) | (quad[1] >> 4));
+    }
+    if (qn == 3 && written < out_cap) {
+        out[written++] = (unsigned char)(((quad[1] & 0xF) << 4) | (quad[2] >> 2));
+    }
+    return written;
 }
 
 static void mcp_json_write_escaped(mcp_socket_t client_fd, const char *value) {
@@ -1276,6 +1395,87 @@ static void mcp_send_variable_list(mcp_socket_t client_fd, const char *id) {
     mcp_send_text(client_fd, "]}\n");
 }
 
+/*
+ * Inject a variable into the base workspace from a base64 column-major payload.
+ * Supports float64 (double) and bool (logical) real matrices. Data is bounded by
+ * the request line size, so this is for modest arrays, not huge datasets.
+ */
+static void mcp_handle_set_variable(mcp_socket_t client_fd, const mcp_request_t *request) {
+    baSize rows = request->dims[0];
+    baSize cols = request->dims[1];
+    baSize elements;
+    unsigned char *raw = NULL;
+    size_t raw_cap;
+    size_t raw_len;
+    bxArray *array = NULL;
+
+    if (!mcp_is_valid_variable_name(request->name)) {
+        mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_BAD_REQUEST, "Invalid variable name.");
+        return;
+    }
+    if (rows < 0 || cols < 0) {
+        mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_BAD_REQUEST, "set_variable dims must be non-negative.");
+        return;
+    }
+    elements = rows * cols;
+
+    raw_cap = strlen(request->data_b64 ? request->data_b64 : "") + 1;
+    raw = (unsigned char *)malloc(raw_cap > 0 ? raw_cap : 1);
+    if (raw == NULL) {
+        mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_INTERNAL, "Out of memory decoding set_variable.");
+        return;
+    }
+    raw_len = mcp_base64_decode(request->data_b64 ? request->data_b64 : "", raw, raw_cap);
+
+    if (strcmp(request->dtype, "float64") == 0) {
+        if (raw_len != (size_t)elements * sizeof(double)) {
+            free(raw);
+            mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_BAD_REQUEST, "set_variable data size does not match dims for float64.");
+            return;
+        }
+        array = bxCreateDoubleMatrix(rows, cols, bxREAL);
+        if (array != NULL) {
+            double *dst = bxGetDoublesRW(array);
+            if (dst != NULL && elements > 0) {
+                memcpy(dst, raw, raw_len);
+            }
+        }
+    } else if (strcmp(request->dtype, "bool") == 0) {
+        if (raw_len != (size_t)elements) {
+            free(raw);
+            mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_BAD_REQUEST, "set_variable data size does not match dims for bool.");
+            return;
+        }
+        array = bxCreateLogicalMatrix(rows, cols);
+        if (array != NULL) {
+            bool *dst = bxGetLogicalsRW(array);
+            if (dst != NULL) {
+                for (baSize i = 0; i < elements; ++i) {
+                    dst[i] = raw[i] != 0;
+                }
+            }
+        }
+    } else {
+        free(raw);
+        mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_BAD_REQUEST, "set_variable supports only float64 and bool.");
+        return;
+    }
+
+    free(raw);
+    if (array == NULL) {
+        mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_VARIABLE, "Failed to create variable array.");
+        return;
+    }
+
+    if (bxAddVariable(request->name, array, bxOVERWRITE) == 1) {
+        /* Ownership transferred on success; do not destroy the array. */
+        mcp_send_success(client_fd, request->id, "");
+    } else {
+        bxDestroyArray(array);
+        mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_VARIABLE, "Baltamatica rejected set_variable.");
+    }
+}
+
 static void mcp_handle_request(mcp_socket_t client_fd, const mcp_request_t *request, volatile int *stop_server, int port) {
     if (strcmp(request->method, BALTAMATICA_MCP_METHOD_STATUS) == 0) {
         mcp_send_status(client_fd, request->id, port);
@@ -1369,6 +1569,11 @@ static void mcp_handle_request(mcp_socket_t client_fd, const mcp_request_t *requ
         return;
     }
 
+    if (strcmp(request->method, BALTAMATICA_MCP_METHOD_SET_VARIABLE) == 0) {
+        mcp_handle_set_variable(client_fd, request);
+        return;
+    }
+
     if (strcmp(request->method, BALTAMATICA_MCP_METHOD_SHUTDOWN) == 0) {
         *stop_server = 1;
         mcp_send_success(client_fd, request->id, "shutting down");
@@ -1401,9 +1606,11 @@ static void mcp_handle_client(mcp_socket_t client_fd, volatile int *stop_server,
                 char id[BALTAMATICA_MCP_MAX_ID] = "";
                 mcp_json_get_string(line, "id", id, sizeof(id));
                 mcp_send_error(client_fd, id, BALTAMATICA_MCP_ERROR_BAD_REQUEST, error);
+                free(request.data_b64);
                 continue;
             }
             mcp_handle_request(client_fd, &request, stop_server, port);
+            free(request.data_b64);
         }
     }
 }

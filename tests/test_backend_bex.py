@@ -242,6 +242,34 @@ def test_get_variable_preserves_structured_value_payload() -> None:
     assert requests == [{"id": "1", "method": "get_variable", "params": {"name": "A"}}]
 
 
+def test_set_variable_sends_binary_column_major_request() -> None:
+    import base64
+    import struct
+
+    async def exercise():
+        server, requests, port = await start_mock_bex_server(
+            lambda request, _: response_for(request, output="")
+        )
+        engine = BexEngine(port=port, timeout=1)
+        try:
+            result = await engine.set_variable("A", [[1, 2], [3, 4]])
+        finally:
+            await engine.close()
+            await close_server(server)
+        return result, requests
+
+    result, requests = run(exercise())
+
+    assert result.success is True
+    params = requests[0]["params"]
+    assert requests[0]["method"] == "set_variable"
+    assert params["name"] == "A"
+    assert params["dtype"] == "float64"
+    assert params["dims"] == [2, 2]
+    # column-major bytes for [[1,2],[3,4]] are 1,3,2,4
+    assert base64.b64decode(params["data_b64"]) == struct.pack("<4d", 1.0, 3.0, 2.0, 4.0)
+
+
 def test_get_variable_returns_failed_execution_result_for_bex_error() -> None:
     async def exercise():
         server, requests, port = await start_mock_bex_server(

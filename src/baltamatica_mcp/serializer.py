@@ -95,6 +95,68 @@ def present_binary_value(value: dict[str, Any], *, name: str) -> tuple[dict[str,
     return presented, [artifact]
 
 
+def encode_for_set(data: Any) -> tuple[str, list[int], bytes]:
+    """Normalize Python data into (dtype, [rows, cols], column-major bytes).
+
+    Accepts a scalar, a 1-D list (row vector), or a 2-D nested list (matrix).
+    Booleans become ``bool`` (logical); all other numbers become ``float64``.
+    """
+
+    dtype, dims, flat = _normalize_for_set(data)
+    if dtype == "bool":
+        raw = bytes(1 if v else 0 for v in flat)
+    else:
+        raw = struct.pack("<%dd" % len(flat), *(float(v) for v in flat))
+    return dtype, dims, raw
+
+
+def to_baltamatica_literal(data: Any) -> str:
+    """Render data as a Baltamatica matrix literal for the CLI backend."""
+    if isinstance(data, bool):
+        return "true" if data else "false"
+    if isinstance(data, (int, float)):
+        return repr(float(data))
+    if isinstance(data, list):
+        if data and all(isinstance(row, list) for row in data):
+            rows = ["  ".join(_scalar_literal(v) for v in row) for row in data]
+            return "[" + "; ".join(rows) + "]"
+        return "[" + "  ".join(_scalar_literal(v) for v in data) + "]"
+    raise ValueError(f"set_variable: unsupported data type {type(data).__name__}")
+
+
+def _scalar_literal(v: Any) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return repr(float(v))
+    raise ValueError("set_variable: matrix must contain only numbers")
+
+
+def _normalize_for_set(data: Any) -> tuple[str, list[int], list[Any]]:
+    if isinstance(data, bool):
+        return "bool", [1, 1], [data]
+    if isinstance(data, (int, float)):
+        return "float64", [1, 1], [float(data)]
+    if isinstance(data, list):
+        if data and all(isinstance(row, list) for row in data):
+            rows = len(data)
+            cols = len(data[0])
+            if any(len(row) != cols for row in data):
+                raise ValueError("set_variable: all matrix rows must be equal length")
+            flat = [data[i][j] for j in range(cols) for i in range(rows)]  # column-major
+            dims = [rows, cols]
+        else:
+            flat = list(data)
+            dims = [1, len(data)]
+        if flat and all(isinstance(v, bool) for v in flat):
+            return "bool", dims, flat
+        for v in flat:
+            if not isinstance(v, (int, float)):  # bool is an int subclass, allowed
+                raise ValueError("set_variable: matrix must contain only numbers")
+        return "float64", dims, flat
+    raise ValueError(f"set_variable: unsupported data type {type(data).__name__}")
+
+
 def present_structured(node: Any) -> Any:
     """Recursively tidy a non-binary structured value (char/string/struct/cell).
 
