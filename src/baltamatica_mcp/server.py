@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -195,9 +196,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """Start the MCP server."""
+    """Start the MCP server, or run the `install-bridge` helper subcommand."""
 
-    args = build_arg_parser().parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] == "install-bridge":
+        from baltamatica_mcp.bridge_install import install_bridge_cli
+
+        install_bridge_cli(raw[1:])
+        return
+
+    args = build_arg_parser().parse_args(raw)
     engine = create_engine(
         args.backend,
         cli_executable=args.cli_executable,
