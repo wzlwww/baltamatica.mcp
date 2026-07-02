@@ -205,16 +205,12 @@ baltamatica-mcp --backend cli
 BALTAMATICA_CLI=/path/to/baltamatica baltamatica-mcp --backend cli
 ```
 
-macOS 社区版通常使用真实可执行文件，而不是 `baltamaticaC.sh` 包装脚本：
+不同平台的命令行入口不一样（后端会自动识别）：macOS 是 `/Applications/Baltamatica.app/Contents/MacOS/baltamatica`，Linux 是 `baltamatica.sh`（会自动设置库路径并透传 `-s` 参数）。在无显示器的 Linux（SSH/服务器）上，后端会自动设 `QT_QPA_PLATFORM=offscreen`。
+
+也可以显式指定入口和单次执行超时：
 
 ```bash
-/Applications/Baltamatica.app/Contents/MacOS/baltamatica
-```
-
-也可以直接通过参数指定北太天元命令行入口和单次执行超时：
-
-```bash
-python -m baltamatica_mcp --backend cli --cli-executable /path/to/baltamatica --timeout 30
+baltamatica-mcp --backend cli --cli-executable /path/to/baltamatica.sh --timeout 30
 ```
 
 CLI 后端会用 `.mat` 状态文件在多次 MCP 调用之间保存工作区变量。默认使用临时状态文件，
@@ -368,6 +364,7 @@ fprintf('BALTAMATICA_ARTIFACT=/tmp/plot.png\n');
 - [x] 打包就绪：`python -m build` 可出 sdist/wheel、控制台入口、`scripts/build_bex.sh` 编译桥接二进制、发布流程见 [docs/releasing.md](docs/releasing.md)
 - [x] 发布 **v0.2.0**：PyPI（`pip install baltamatica-mcp`）+ GitHub Release（含 macOS/Linux/Windows 三平台预编译二进制）
 - [x] **v0.2.1** 安装简化：CLI 后端零配置自动探测北太天元 + `baltamatica-mcp install-bridge` 一键下载桥接二进制
+- [x] **v0.2.2** Linux 修复：CLI 后端改用 `baltamatica.sh`（`baltamaticaC.sh` 会吞掉 `-s`）+ 无显示器时自动 `QT_QPA_PLATFORM=offscreen`（mac/Linux 均实测通过）
 
 ### 下一步
 

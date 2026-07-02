@@ -22,7 +22,10 @@ from baltamatica_mcp.engine import (
     VariableListResult,
 )
 
-DEFAULT_EXECUTABLE = "baltamaticaC.sh"
+# Prefer the general launcher, which passes through -nodesktop/-s arguments and
+# sets LD_LIBRARY_PATH. (baltamaticaC.sh is the interactive console launcher and
+# on some builds drops its arguments, so -s never reaches the interpreter.)
+DEFAULT_EXECUTABLE = "baltamatica.sh"
 ENV_EXECUTABLE = "BALTAMATICA_CLI"
 
 # Standard install locations, tried when nothing is configured and the launcher
@@ -193,6 +196,7 @@ class CliEngine:
                 check=False,
                 stdin=subprocess.DEVNULL,
                 creationflags=creationflags,
+                env=_cli_subprocess_env(),
                 timeout=self.timeout,
             )
         except subprocess.TimeoutExpired as exc:
@@ -207,6 +211,22 @@ class CliEngine:
             stdout=_decode_process_output(process.stdout),
             stderr=_decode_process_output(process.stderr),
         )
+
+
+def _cli_subprocess_env() -> dict[str, str]:
+    """Environment for the Baltamatica subprocess.
+
+    On a headless Linux host (no DISPLAY), force Qt's offscreen platform so the
+    -nodesktop interpreter can initialize without an X server (SSH/servers/CI).
+    """
+    env = os.environ.copy()
+    if (
+        platform.system() == "Linux"
+        and "DISPLAY" not in env
+        and "QT_QPA_PLATFORM" not in env
+    ):
+        env["QT_QPA_PLATFORM"] = "offscreen"
+    return env
 
 
 def _combine_output(stdout: str | None, stderr: str | None) -> str:

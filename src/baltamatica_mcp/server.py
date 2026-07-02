@@ -168,7 +168,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cli-executable",
         default=None,
-        help="Path or command name for baltamaticaC.sh. Defaults to BALTAMATICA_CLI or PATH.",
+        help="Path/command for the Baltamatica launcher. Defaults to BALTAMATICA_CLI, "
+        "then the launcher on PATH, then the standard install location.",
     )
     parser.add_argument(
         "--bex-host",

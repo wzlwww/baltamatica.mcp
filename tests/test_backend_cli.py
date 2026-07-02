@@ -316,3 +316,21 @@ def test_resolve_executable_errors_when_nothing_found(monkeypatch) -> None:
     engine = CliEngine()
     with pytest.raises(EngineUnavailableError):
         engine._resolve_executable()
+
+
+def test_cli_subprocess_env_forces_offscreen_on_headless_linux(monkeypatch) -> None:
+    from baltamatica_mcp.backend_cli import _cli_subprocess_env
+
+    monkeypatch.setattr("baltamatica_mcp.backend_cli.platform.system", lambda: "Linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    assert _cli_subprocess_env()["QT_QPA_PLATFORM"] == "offscreen"
+
+
+def test_cli_subprocess_env_keeps_display(monkeypatch) -> None:
+    from baltamatica_mcp.backend_cli import _cli_subprocess_env
+
+    monkeypatch.setattr("baltamatica_mcp.backend_cli.platform.system", lambda: "Linux")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    assert "QT_QPA_PLATFORM" not in _cli_subprocess_env()
