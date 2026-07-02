@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import locale
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -23,6 +24,14 @@ from baltamatica_mcp.engine import (
 
 DEFAULT_EXECUTABLE = "baltamaticaC.sh"
 ENV_EXECUTABLE = "BALTAMATICA_CLI"
+
+# Standard install locations, tried when nothing is configured and the launcher
+# is not on PATH, so `baltamatica-mcp --backend cli` works with zero config.
+COMMON_EXECUTABLES = {
+    "Darwin": ["/Applications/Baltamatica.app/Contents/MacOS/baltamatica"],
+    "Linux": ["/opt/Baltamatica/bin/baltamatica.sh"],
+    "Windows": [r"C:\Program Files\Baltamatica\bin\baltamatica.exe"],
+}
 ARTIFACT_PREFIX = "BALTAMATICA_ARTIFACT="
 VAR_NAME_PATTERN = re.compile(r"^[A-Za-z]\w*$")
 ANSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
@@ -129,6 +138,12 @@ class CliEngine:
         resolved = shutil.which(DEFAULT_EXECUTABLE)
         if resolved:
             return resolved
+
+        # Zero-config fallback: probe standard per-OS install locations.
+        for candidate in COMMON_EXECUTABLES.get(platform.system(), []):
+            if Path(candidate).exists():
+                return candidate
+
         raise EngineUnavailableError(
             f"Baltamatica CLI executable not found. Set {ENV_EXECUTABLE} or pass --cli-executable."
         )

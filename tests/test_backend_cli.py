@@ -292,3 +292,27 @@ def test_detect_baltamatica_error_strips_ansi_sequences() -> None:
     assert detect_baltamatica_error(output) == (
         "Baltamatica reported an error: 错误使用函数 fprintf"
     )
+
+
+def test_resolve_executable_auto_detects_standard_location(tmp_path, monkeypatch) -> None:
+    fake = tmp_path / "baltamatica"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.delenv("BALTAMATICA_CLI", raising=False)
+    monkeypatch.setattr("baltamatica_mcp.backend_cli.shutil.which", lambda *_: None)
+    monkeypatch.setattr("baltamatica_mcp.backend_cli.platform.system", lambda: "TestOS")
+    monkeypatch.setattr(
+        "baltamatica_mcp.backend_cli.COMMON_EXECUTABLES", {"TestOS": [str(fake)]}
+    )
+    engine = CliEngine()  # nothing configured, not on PATH
+    assert engine._resolve_executable() == str(fake)
+
+
+def test_resolve_executable_errors_when_nothing_found(monkeypatch) -> None:
+    monkeypatch.delenv("BALTAMATICA_CLI", raising=False)
+    monkeypatch.setattr("baltamatica_mcp.backend_cli.shutil.which", lambda *_: None)
+    monkeypatch.setattr("baltamatica_mcp.backend_cli.platform.system", lambda: "TestOS")
+    monkeypatch.setattr("baltamatica_mcp.backend_cli.COMMON_EXECUTABLES", {"TestOS": []})
+    engine = CliEngine()
+    with pytest.raises(EngineUnavailableError):
+        engine._resolve_executable()
