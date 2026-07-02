@@ -128,7 +128,7 @@ PYTHONPATH=src python -m baltamatica_mcp.bex_shutdown
 
 **已知限制**：
 
-- 变量值始终以文本形式返回；小型实数数值/逻辑数组附带结构化 JSON。大数组会截断；二进制矩阵传输、复数/字符/结构体/元胞的结构化序列化仍在后续 PR。
+- `get_variable` 已支持:数值/逻辑数组(实数**和复数**、任意大小)走 base64 二进制全保真回传;字符/字符串/结构体/元胞走结构化 JSON。极大的结构体/元胞会按上限截断(见 `truncated` 字段);结构体/元胞里嵌套的数值目前是列主序扁平数组。
 - `execute_code` 暂不捕获控制台输出（计算结果请用 `get_variable` 取回）。
 - 屏幕绘图可用（`figure`/`plot` 等会在 GUI 弹窗），但**图形导出到文件不可用**——当前北太天元未提供 `saveas`/`print`/`exportgraphics` 等函数；要回传图像需走数据侧（`BALTAMATICA_ARTIFACT` + CSV）或后续的绘图探针。
 - 日常稳定试用仍可优先使用 CLI 后端。

@@ -61,9 +61,12 @@ typedef pthread_t mcp_thread_t;
 
 #define MCP_ARRAY_LINE_WIDTH 120
 #define MCP_MAX_OUTPUT 32768
-#define MCP_MAX_VALUE_JSON 32768
+#define MCP_MAX_VALUE_JSON 262144
 #define MCP_MAX_VARIABLES 512
 #define MCP_MAX_VALUE_ELEMENTS 512
+#define MCP_MAX_VALUE_DEPTH 6
+#define MCP_MAX_STRUCT_ELEMENTS 64
+#define MCP_MAX_CELL_ELEMENTS 256
 
 typedef struct mcp_request_t {
     char id[BALTAMATICA_MCP_MAX_ID];
@@ -993,105 +996,171 @@ static void mcp_append_escaped(char *buffer, size_t buffer_size, size_t *used, c
     }
 }
 
-static void mcp_array_to_json_value(const bxArray *value, char *buffer, size_t buffer_size) {
+/*
+ * Append one variable as a JSON value at *used (composable, so structs and cells
+ * can recurse into their members). Numeric leaves use a bounded column-major
+ * data array; nested numeric arrays are not streamed as binary. Depth and
+ * element counts are capped so the bounded output buffer cannot be overrun.
+ */
+static void mcp_append_value(const bxArray *value, char *buffer, size_t buffer_size, size_t *used, int depth) {
     bxClassID class_id = bxGetClassID(value);
     baSize ndim = bxGetNumberOfDimensions(value);
     const baSize *dims = bxGetDimensions(value);
     baSize elements = bxGetNumberOfElements(value);
-    baSize emitted = elements < MCP_MAX_VALUE_ELEMENTS ? elements : MCP_MAX_VALUE_ELEMENTS;
     char size_text[128];
-    size_t used = 0;
 
-    if (buffer_size == 0) {
+    mcp_format_size(value, size_text, sizeof(size_text));
+
+    if (depth > MCP_MAX_VALUE_DEPTH) {
+        mcp_append_json(
+            buffer, buffer_size, used,
+            "{\"supported\":false,\"type\":\"truncated\",\"class_name\":\"%s\",\"size\":\"%s\","
+            "\"reason\":\"maximum nesting depth reached\"}",
+            mcp_class_name_from_id(class_id), size_text);
         return;
     }
-    buffer[0] = '\0';
-    mcp_format_size(value, size_text, sizeof(size_text));
-    mcp_append_json(buffer, buffer_size, &used, "{\"supported\":");
+
+    mcp_append_json(buffer, buffer_size, used, "{\"supported\":");
 
     if (class_id == bxCHAR_CLASS) {
         char text[MCP_MAX_OUTPUT];
         mcp_array_to_output(value, text, sizeof(text));
         mcp_append_json(
-            buffer,
-            buffer_size,
-            &used,
+            buffer, buffer_size, used,
             "true,\"type\":\"char\",\"class_name\":\"char\",\"size\":\"%s\",\"element_count\":%lld,\"text\":\"",
-            size_text,
-            (long long)elements);
-        mcp_append_escaped(buffer, buffer_size, &used, text);
-        mcp_append_json(buffer, buffer_size, &used, "\"}");
+            size_text, (long long)elements);
+        mcp_append_escaped(buffer, buffer_size, used, text);
+        mcp_append_json(buffer, buffer_size, used, "\"}");
         return;
     }
 
     if (class_id == bxSTRING_CLASS) {
         baSize cap = elements < MCP_MAX_VALUE_ELEMENTS ? elements : MCP_MAX_VALUE_ELEMENTS;
         mcp_append_json(
-            buffer,
-            buffer_size,
-            &used,
+            buffer, buffer_size, used,
             "true,\"type\":\"string\",\"class_name\":\"string\",\"size\":\"%s\","
             "\"element_count\":%lld,\"truncated\":%s,\"encoding\":\"column-major\",\"data\":[",
-            size_text,
-            (long long)elements,
-            elements > MCP_MAX_VALUE_ELEMENTS ? "true" : "false");
+            size_text, (long long)elements, elements > MCP_MAX_VALUE_ELEMENTS ? "true" : "false");
         for (baSize i = 0; i < cap; ++i) {
             const char *text = bxGetString(value, i);
-            if (i > 0) {
-                mcp_append_json(buffer, buffer_size, &used, ",");
-            }
-            mcp_append_json(buffer, buffer_size, &used, "\"");
-            mcp_append_escaped(buffer, buffer_size, &used, text);
-            mcp_append_json(buffer, buffer_size, &used, "\"");
+            mcp_append_json(buffer, buffer_size, used, "%s\"", i == 0 ? "" : ",");
+            mcp_append_escaped(buffer, buffer_size, used, text);
+            mcp_append_json(buffer, buffer_size, used, "\"");
         }
-        mcp_append_json(buffer, buffer_size, &used, "]}");
+        mcp_append_json(buffer, buffer_size, used, "]}");
+        return;
+    }
+
+    if (class_id == bxSTRUCT_CLASS) {
+        baSize nfields = bxGetNumberOfFields(value);
+        baSize elem_cap = elements < MCP_MAX_STRUCT_ELEMENTS ? elements : MCP_MAX_STRUCT_ELEMENTS;
+        mcp_append_json(
+            buffer, buffer_size, used,
+            "true,\"type\":\"struct\",\"class_name\":\"struct\",\"size\":\"%s\","
+            "\"element_count\":%lld,\"truncated\":%s,\"fields\":[",
+            size_text, (long long)elements, elements > MCP_MAX_STRUCT_ELEMENTS ? "true" : "false");
+        for (baSize k = 0; k < nfields; ++k) {
+            mcp_append_json(buffer, buffer_size, used, "%s\"", k == 0 ? "" : ",");
+            mcp_append_escaped(buffer, buffer_size, used, bxGetFieldNameByNumber(value, (int)k));
+            mcp_append_json(buffer, buffer_size, used, "\"");
+        }
+        mcp_append_json(buffer, buffer_size, used, "],\"data\":[");
+        for (baSize e = 0; e < elem_cap; ++e) {
+            mcp_append_json(buffer, buffer_size, used, "%s{", e == 0 ? "" : ",");
+            for (baSize k = 0; k < nfields; ++k) {
+                const bxArray *field = bxGetFieldByNumberRO(value, e, (int)k);
+                mcp_append_json(buffer, buffer_size, used, "%s\"", k == 0 ? "" : ",");
+                mcp_append_escaped(buffer, buffer_size, used, bxGetFieldNameByNumber(value, (int)k));
+                mcp_append_json(buffer, buffer_size, used, "\":");
+                if (field != NULL) {
+                    mcp_append_value(field, buffer, buffer_size, used, depth + 1);
+                } else {
+                    mcp_append_json(buffer, buffer_size, used, "null");
+                }
+            }
+            mcp_append_json(buffer, buffer_size, used, "}");
+        }
+        mcp_append_json(buffer, buffer_size, used, "]}");
+        return;
+    }
+
+    if (class_id == bxCELL_CLASS) {
+        baSize cap = elements < MCP_MAX_CELL_ELEMENTS ? elements : MCP_MAX_CELL_ELEMENTS;
+        mcp_append_json(
+            buffer, buffer_size, used,
+            "true,\"type\":\"cell\",\"class_name\":\"cell\",\"size\":\"%s\","
+            "\"element_count\":%lld,\"truncated\":%s,\"encoding\":\"column-major\",\"dims\":[",
+            size_text, (long long)elements, elements > MCP_MAX_CELL_ELEMENTS ? "true" : "false");
+        if (ndim <= 0 || dims == NULL) {
+            mcp_append_json(buffer, buffer_size, used, "%lld,%lld", (long long)bxGetM(value), (long long)bxGetN(value));
+        } else {
+            for (baSize i = 0; i < ndim; ++i) {
+                mcp_append_json(buffer, buffer_size, used, "%s%lld", i == 0 ? "" : ",", (long long)dims[i]);
+            }
+        }
+        mcp_append_json(buffer, buffer_size, used, "],\"data\":[");
+        for (baSize i = 0; i < cap; ++i) {
+            const bxArray *element = bxGetCellRO(value, i);
+            if (i > 0) {
+                mcp_append_json(buffer, buffer_size, used, ",");
+            }
+            if (element != NULL) {
+                mcp_append_value(element, buffer, buffer_size, used, depth + 1);
+            } else {
+                mcp_append_json(buffer, buffer_size, used, "null");
+            }
+        }
+        mcp_append_json(buffer, buffer_size, used, "]}");
         return;
     }
 
     if (!mcp_structured_value_supported(value)) {
         mcp_append_json(
-            buffer,
-            buffer_size,
-            &used,
+            buffer, buffer_size, used,
             "false,\"type\":\"unsupported\",\"class_name\":\"%s\",\"size\":\"%s\","
             "\"element_count\":%lld,\"reason\":\"Type not yet serialized; see output for text form.\"}",
-            mcp_class_name_from_id(class_id),
-            size_text,
-            (long long)elements);
+            mcp_class_name_from_id(class_id), size_text, (long long)elements);
         return;
     }
 
-    mcp_append_json(
-        buffer,
-        buffer_size,
-        &used,
-        "true,\"type\":\"%s\",\"class_name\":\"%s\",\"size\":\"%s\",\"dims\":[",
-        class_id == bxLOGICAL_CLASS ? "logical_array" : "numeric_array",
-        mcp_class_name_from_id(class_id),
-        size_text);
-    if (ndim <= 0 || dims == NULL) {
-        mcp_append_json(buffer, buffer_size, &used, "%lld,%lld", (long long)bxGetM(value), (long long)bxGetN(value));
-    } else {
-        for (baSize i = 0; i < ndim; ++i) {
-            mcp_append_json(buffer, buffer_size, &used, "%s%lld", i == 0 ? "" : ",", (long long)dims[i]);
+    /* Real numeric / logical leaf: bounded column-major JSON data array. */
+    {
+        baSize emitted = elements < MCP_MAX_VALUE_ELEMENTS ? elements : MCP_MAX_VALUE_ELEMENTS;
+        mcp_append_json(
+            buffer, buffer_size, used,
+            "true,\"type\":\"%s\",\"class_name\":\"%s\",\"size\":\"%s\",\"dims\":[",
+            class_id == bxLOGICAL_CLASS ? "logical_array" : "numeric_array",
+            mcp_class_name_from_id(class_id), size_text);
+        if (ndim <= 0 || dims == NULL) {
+            mcp_append_json(buffer, buffer_size, used, "%lld,%lld", (long long)bxGetM(value), (long long)bxGetN(value));
+        } else {
+            for (baSize i = 0; i < ndim; ++i) {
+                mcp_append_json(buffer, buffer_size, used, "%s%lld", i == 0 ? "" : ",", (long long)dims[i]);
+            }
         }
+        mcp_append_json(
+            buffer, buffer_size, used,
+            "],\"encoding\":\"column-major\",\"element_count\":%lld,\"truncated\":%s,\"data\":[",
+            (long long)elements, elements > MCP_MAX_VALUE_ELEMENTS ? "true" : "false");
+        for (baSize i = 0; i < emitted; ++i) {
+            if (i > 0) {
+                mcp_append_json(buffer, buffer_size, used, ",");
+            }
+            if (!mcp_append_value_number(value, i, buffer, buffer_size, used)) {
+                mcp_append_json(buffer, buffer_size, used, "null");
+            }
+        }
+        mcp_append_json(buffer, buffer_size, used, "]}");
     }
-    mcp_append_json(
-        buffer,
-        buffer_size,
-        &used,
-        "],\"encoding\":\"column-major\",\"element_count\":%lld,\"truncated\":%s,\"data\":[",
-        (long long)elements,
-        elements > MCP_MAX_VALUE_ELEMENTS ? "true" : "false");
-    for (baSize i = 0; i < emitted; ++i) {
-        if (i > 0) {
-            mcp_append_json(buffer, buffer_size, &used, ",");
-        }
-        if (!mcp_append_value_number(value, i, buffer, buffer_size, &used)) {
-            mcp_append_json(buffer, buffer_size, &used, "null");
-        }
+}
+
+static void mcp_array_to_json_value(const bxArray *value, char *buffer, size_t buffer_size) {
+    size_t used = 0;
+    if (buffer_size == 0) {
+        return;
     }
-    mcp_append_json(buffer, buffer_size, &used, "]}");
+    buffer[0] = '\0';
+    mcp_append_value(value, buffer, buffer_size, &used, 0);
 }
 
 static void mcp_send_variable_value(mcp_socket_t client_fd, const char *id, const char *output, const char *value_json) {
@@ -1261,7 +1330,6 @@ static void mcp_handle_request(mcp_socket_t client_fd, const mcp_request_t *requ
     if (strcmp(request->method, BALTAMATICA_MCP_METHOD_GET_VARIABLE) == 0) {
         bxArray *value = NULL;
         char output[MCP_MAX_OUTPUT];
-        char value_json[MCP_MAX_VALUE_JSON];
 
         if (!mcp_is_valid_variable_name(request->name)) {
             mcp_send_error(client_fd, request->id, BALTAMATICA_MCP_ERROR_BAD_REQUEST, "Invalid variable name.");
@@ -1282,9 +1350,16 @@ static void mcp_handle_request(mcp_socket_t client_fd, const mcp_request_t *requ
             /* Full-fidelity numeric/logical transfer: stream raw bytes as base64. */
             mcp_send_variable_binary(client_fd, request->id, output, value);
         } else {
-            /* char/string/struct/cell/etc.: text output plus an "unsupported" marker. */
-            mcp_array_to_json_value(value, value_json, sizeof(value_json));
-            mcp_send_variable_value(client_fd, request->id, output, value_json);
+            /* char/string/struct/cell/etc.: structured JSON built into a heap
+             * buffer (too large for the worker-thread stack). */
+            char *value_json = (char *)malloc(MCP_MAX_VALUE_JSON);
+            if (value_json != NULL) {
+                mcp_array_to_json_value(value, value_json, MCP_MAX_VALUE_JSON);
+                mcp_send_variable_value(client_fd, request->id, output, value_json);
+                free(value_json);
+            } else {
+                mcp_send_variable_value(client_fd, request->id, output, "null");
+            }
         }
         bxDestroyArray(value);
         return;
